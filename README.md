@@ -8,6 +8,8 @@
 
 > 社区项目，非 MoonBit 官方出品。`moon` 前缀只是沿用社区命名惯例（moondb / moonrpc / moongql）。
 
+中文 · [English](README.en.md)
+
 ---
 
 ## 为什么存在
