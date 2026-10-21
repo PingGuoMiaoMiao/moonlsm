@@ -126,6 +126,43 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
   - C1 不变：ack 发出之前 fsync 一定已成功。变的只是「一批里 fsync 几次」
 - `docs/adr/0005-group-commit.md`：决策记录，含「两条路径失败可见性不同」的说明
 
+**MANIFEST 与目录布局（Week 2 D3）**
+
+- `manifest.mbt`：版本快照的编解码
+  - `Version{last_seq, log_number, next_file_number, levels}` + `SstMeta{number, file_size, smallest, largest}`
+  - 全量快照而非增量 log：只有「读成功 / 读失败」两种结果，
+    不需要「重放到一半又崩溃」那套状态机（ADR-0002 同一思路）
+  - `decode_manifest` 的校验顺序是「长度 → magic → version → **CRC** → 逐字段」，
+    CRC 放在解析之前：先解析的话，一份随机垃圾会让解析器分配一堆数组、
+    走一堆分支，最后才发现「这是垃圾」
+  - 坏数据防护：`num_levels` / 每层 SST 数 / key 长度都有上限。
+    这些字段来自磁盘，一个坏值（`0x7FFFFFFF`）会让解码尝试分配几十 GB
+  - 尾部必须**正好用完**：多余字节说明快照和解析器对格式的理解不一致，继续读就是在猜
+  - `check_invariants()` 单独做语义校验（L1+ 同层不重叠且按 smallest 升序、
+    `log_number < next_file_number`）。**L0 不检查重叠** ——
+    它们来自不同时刻的 memtable，范围天然可以重叠
+- **磁盘布局切换**：`wal/<n>.wal` + `sst/<n>.sst` + `MANIFEST-<n>` + `CURRENT`，
+  文件编号**全局共享**（存在 MANIFEST 里）。
+  原来的扁平 `WAL-000001` / `SST-000001` 用两个独立计数器，
+  在引入 WAL 轮转后必然撞号
+- `db.mbt` 接入 MANIFEST：`open` 读 CURRENT → 读 MANIFEST → 加载 SST → 重放 WAL
+  - `flush` 变成「写 SST → 建新 WAL → 更新 version → 原子切 CURRENT → 删旧 WAL → 清 memtable」，
+    每一步的崩溃点都有明确的恢复路径（见函数注释里的崩溃点分析）
+  - WAL 轮转：每次 flush 换一个新的 `wal/<n>.wal`，旧的在 CURRENT 切换成功后删除
+  - `bump_file_number_past_existing()`：打开时让 `next_file_number` 跳过目录里
+    已存在的编号，避免覆盖崩溃遗留的孤儿 SST
+- `storage.mbt` / `fs_native.mbt`：`list_files` 语义从「按名字前缀过滤」改为
+  **「列某个子目录」**（返回 basename）。前缀过滤会把 `SST-1` 和 `SST-1.bak`
+  一起捞出来，而目录列举天然只给真实存在的东西
+  - `NativeStorage` 过滤掉 `.` / `..`，并跳过子目录 ——
+    `readdir` 会把 `sst/` / `wal/` 也列出来，而契约是「这一层的**文件**」，
+    两边语义必须一致，否则「内存后端跑绿的用例换真文件系统就红」
+- `docs/adr/0006-refuse-to-open-on-bad-manifest.md`：**推翻**了 `format.md`
+  原来的「MANIFEST 读不出来就退回次大编号」设计 —— 回退会丢掉已经 ack 的数据
+  （那些数据在更新的 SST 里，旧 MANIFEST 不认识它），直接违反 C1。改为拒绝启动
+- `docs/design/format.md` §4.3 重写：补上「拒绝启动的三种情形」和
+  「为什么 MANIFEST 坏了不回退」的完整推导，并与 WAL 尾部截断做了对照
+
 ### 变更
 
 - **`put` 与 `put_deferred` 的失败可见性有意不同**（详见 ADR-0005）：

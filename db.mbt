@@ -42,8 +42,11 @@ pub struct Db[S] {
   mem_limit : Int
   mut seq : UInt64
   mut flush_count : Int
-  /// 下一个可用的 SST 编号。恢复时从已有文件的最大编号推出来。
-  mut next_sst : Int
+  /// 版本快照：每层有哪些 SST、活跃 WAL 编号、下一个可用文件编号。
+  /// 它是**唯一**的文件编号来源 —— 不要再单独维护计数器。
+  mut version : Version
+  /// 当前 MANIFEST 的文件名（如 `MANIFEST-000007`）。空串表示还没写过。
+  mut current_manifest : String
   /// 每次写入是否立刻 fsync。关掉它是为了压测「不落盘能跑多快」，
   /// **默认必须是 true**——关掉就等于放弃了 C1。
   sync_on_write : Bool
@@ -65,15 +68,38 @@ pub struct Db[S] {
 }
 
 ///|
-/// WAL 文件名。v1 只用一个 WAL，刷盘时清空而不是轮转。
+/// 磁盘布局（`docs/design/format.md` §1）：
 ///
-/// 固定名字（不带编号）是有意的：轮转要处理「两个 WAL 同时存在时按什么
-/// 顺序重放」，而刷盘时 SST 已经持久化，WAL 清空是安全的。
-/// 等 compaction 引入后台任务、需要并发写多代 WAL 时再改。
-pub const WAL_FILE : String = "WAL-000001"
+/// ```
+/// <db_path>/
+/// ├── CURRENT              # 文本，内容是当前 MANIFEST 的文件名 + "\n"
+/// ├── MANIFEST-000007      # 版本快照
+/// ├── wal/
+/// │   └── 000008.wal       # 活跃 WAL
+/// └── sst/
+///     └── 000004.sst
+/// ```
+///
+/// **文件编号全局共享**：WAL、SST、MANIFEST 从同一个单调递增计数器取号
+/// （存在 MANIFEST 的 `next_file_number` 里）。这样任何两个文件不会撞名，
+/// 恢复时也只需比较编号大小。
+///
+/// 早期版本用的是根目录扁平的 `WAL-000001` / `SST-000001`，两个独立计数器。
+/// 那种布局在引入 WAL 轮转（每次 flush 换一个新 WAL）之后就不成立了：
+/// 两个计数器会各自撞上对方已经用过的号。
+pub const WAL_DIR : String = "wal"
 
 ///|
-const SST_PREFIX : String = "SST-"
+pub const SST_DIR : String = "sst"
+
+///|
+pub const CURRENT_FILE : String = "CURRENT"
+
+///|
+const CURRENT_TMP : String = "CURRENT.tmp"
+
+///|
+const MANIFEST_PREFIX : String = "MANIFEST-"
 
 ///|
 /// 打开（或新建）数据库。`mem_limit` 是 memtable 的字节阈值。
@@ -104,7 +130,8 @@ pub fn[S : Storage] Db::open_with(
     mem_limit,
     seq: 0UL,
     flush_count: 0,
-    next_sst: 1,
+    version: Version::new(),
+    current_manifest: "",
     sync_on_write,
     pending: [],
     wal_bytes: 0,
@@ -115,46 +142,62 @@ pub fn[S : Storage] Db::open_with(
 }
 
 ///|
-/// 从磁盘恢复。顺序是 **先 SST 后 WAL**：SST 提供基线，WAL 覆盖在其上。
+/// 打开数据库：读 CURRENT → 读 MANIFEST → 加载 SST → 重放 WAL。
+///
+/// 顺序是 **先 SST 后 WAL**：SST 提供基线，WAL 覆盖在其上。
 ///
 /// 反过来（先 WAL 后 SST）会出错：SST 里的条目 seq 更小，但插到 memtable
 /// 前面之后 `get` 会先命中 memtable，表面上「碰巧对了」；一旦 memtable
 /// 里没有那个 key，就会读到 SST 的旧值。这种错在测试里极难复现。
 fn[S : Storage] Db::recover(self : Db[S]) -> Unit raise LsmError {
-  let mut max_seq = 0UL
-  // list_files 按字节序排序，配合零填充的编号，就是编号升序 = 从旧到新。
-  // 依次插到数组最前面，得到「从新到旧」。
-  for name in Storage::list_files(self.storage, SST_PREFIX) {
-    let raw = match Storage::read_file(self.storage, name) {
-      Some(b) => b
-      None => raise LsmError::io("SST 文件在读的瞬间消失了：\{name}")
-    }
-    let r = match open_sst(raw) {
-      Some(r) => r
-      None =>
-        raise LsmError::corruption(
-          "SST 打不开（文件损坏或版本不兼容）：\{name}",
-        )
-    }
-    let num = parse_sst_number(name)
-    if num >= self.next_sst {
-      self.next_sst = num + 1
-    }
-    for e in r.entries() {
-      if e.seq > max_seq {
-        max_seq = e.seq
+  self.load_version()
+  let mut max_seq = self.version.last_seq
+  // 加载 SST，顺序必须让 `self.ssts[0]` 是最新的文件 —— `get` 靠这个
+  // 顺序做短路，顺序反了就会读到旧值。
+  //
+  // 正确的顺序是「层号升序（L0 最新）+ 层内编号降序」：
+  // L0 的 SST 来自更晚的 memtable，所以整个 L0 都比 L1 新；
+  // 同层内编号越大越新。依次 push 正好得到「从新到旧」。
+  for lv in 0..<self.version.level_count() {
+    let files = self.version.level(lv)
+    let mut i = files.length()
+    while i > 0 {
+      i = i - 1
+      let meta = files[i]
+      let path = sst_path(meta.number)
+      let raw = match Storage::read_file(self.storage, path) {
+        Some(b) => b
+        None =>
+          raise LsmError::corruption(
+            "MANIFEST 里登记了 \{path}，但文件不存在（元信息与实际不一致）",
+          )
       }
+      let r = match open_sst(raw) {
+        Some(r) => r
+        None =>
+          raise LsmError::corruption(
+            "SST 打不开（文件损坏或版本不兼容）：\{path}",
+          )
+      }
+      for e in r.entries() {
+        if e.seq > max_seq {
+          max_seq = e.seq
+        }
+      }
+      self.ssts.push(r)
     }
-    self.ssts.insert(0, r)
   }
-  let wal = match Storage::read_file(self.storage, WAL_FILE) {
+  let wpath = self.wal_name()
+  let wal = match Storage::read_file(self.storage, wpath) {
     Some(b) => b
     None => {
-      // 新库。立刻把文件头写下去，而不是等到第一次 put——
-      // 否则「目录里有 SST 但没有 WAL」这种状态会一直存在到第一次写入。
+      // MANIFEST 指向的 WAL 不存在。可能是被人删了，也可能是初始化
+      // 写到一半崩了。建一个空的：WAL 只是「未刷盘写入的暂存区」，
+      // 而 SST 里的数据已经登记在 MANIFEST 里，不会因此丢。
+      // 真正会丢的是「还没 flush 的写入」—— 那种情况下本来也没有 ack。
       let empty = empty_wal_bytes()
-      Storage::write_file(self.storage, WAL_FILE, empty)
-      Storage::sync_file(self.storage, WAL_FILE)
+      Storage::write_file(self.storage, wpath, empty)
+      Storage::sync_file(self.storage, wpath)
       empty
     }
   }
@@ -162,11 +205,11 @@ fn[S : Storage] Db::recover(self : Db[S]) -> Unit raise LsmError {
   let rep = recover_wal(wal)
   if !rep.header_ok() {
     // 文件头都不对，整份 WAL 没有可用内容。重建一个空的，
-    // 而不是让数据库起不来——WAL 是「未确认写入的暂存区」，
+    // 而不是让数据库起不来 —— WAL 是「未确认写入的暂存区」，
     // 丢掉它最坏的情况是丢最后一次未刷盘的写入，比拒绝启动好。
     let empty = empty_wal_bytes()
-    Storage::write_file(self.storage, WAL_FILE, empty)
-    Storage::sync_file(self.storage, WAL_FILE)
+    Storage::write_file(self.storage, wpath, empty)
+    Storage::sync_file(self.storage, wpath)
     self.wal_bytes = empty.length()
   } else if rep.is_truncated() {
     // 尾部有半条记录 —— 这是断电的常态，不是数据损坏。
@@ -175,8 +218,8 @@ fn[S : Storage] Db::recover(self : Db[S]) -> Unit raise LsmError {
     // 不用 ftruncate：Windows 的 CRT 里没有这个符号（只有 `_chsize`），
     // 而重写一个 WAL 的成本只是「文件多大就写多少」，且只在崩溃后发生一次。
     let good = take_prefix(wal, rep.good_bytes())
-    Storage::write_file(self.storage, WAL_FILE, good)
-    Storage::sync_file(self.storage, WAL_FILE)
+    Storage::write_file(self.storage, wpath, good)
+    Storage::sync_file(self.storage, wpath)
     self.wal_bytes = good.length()
   }
   for rec in rep.records() {
@@ -186,6 +229,228 @@ fn[S : Storage] Db::recover(self : Db[S]) -> Unit raise LsmError {
     }
   }
   self.seq = max_seq
+  // 编号比 log_number 小的 WAL 都是历史遗留：它们的数据已经进了 SST，
+  // MANIFEST 也不会再引用它们。删掉，否则目录会一直涨。
+  for name in Storage::list_files(self.storage, WAL_DIR) {
+    match parse_number_prefix(name) {
+      Some(n) =>
+        if n < self.version.log_number {
+          Storage::remove_file(self.storage, WAL_DIR + "/" + name)
+        }
+      None => ()
+    }
+  }
+}
+
+///|
+/// 读 CURRENT → 读 MANIFEST，把版本快照装进 `self.version`。
+///
+/// 三种情形：
+/// - **CURRENT 存在且指向的 MANIFEST 能解码** → 正常恢复
+/// - **CURRENT 不存在，且目录里没有任何数据文件** → 全新的库，初始化
+/// - **其他** → `Corruption`，拒绝启动
+///
+/// 最后一条是刻意「不宽容」的：WAL 尾部的半条记录可以截断（那是断电常态），
+/// 但「不知道数据布局」时硬猜会**静默丢数据**。宁可拒绝启动让人来看。
+fn[S : Storage] Db::load_version(self : Db[S]) -> Unit raise LsmError {
+  let cur = Storage::read_file(self.storage, CURRENT_FILE)
+  match cur {
+    None =>
+      if self.has_any_data_file() {
+        raise LsmError::corruption(
+          "CURRENT 缺失，但目录里已有数据文件。无法推断布局，拒绝启动。",
+        )
+      } else {
+        self.init_fresh()
+      }
+    Some(raw) =>
+      match parse_current(@utf8.decode_lossy(raw)) {
+        None => raise LsmError::corruption("CURRENT 内容无法解析")
+        Some(name) => {
+          self.version = self.read_manifest(name)
+          self.current_manifest = name
+        }
+      }
+  }
+  // 目录里可能残留孤儿文件（崩溃在「写完 SST」和「写 MANIFEST」之间）。
+  // 编号必须跳过它们，否则下一次 flush 会覆盖一个已经存在的文件 ——
+  // 虽然孤儿没被引用、覆盖它无害，但「文件名和内容不对应」会让
+  // 排查问题时彻底失去方向。
+  self.bump_file_number_past_existing()
+}
+
+///|
+/// 读 CURRENT 指向的那份 MANIFEST。
+///
+/// **读不懂就拒绝启动，不退回旧版本。**
+///
+/// 早期版本这里实现了「退回编号次大的 MANIFEST」的兜底。删掉它是因为
+/// 想清楚了一件事：退回旧 MANIFEST 会**丢掉已经 ack 的数据**。
+///
+/// 具体地：`flush` 把数据写进新 SST、把新 SST 登记进新 MANIFEST，
+/// 然后删掉旧 WAL（那批写入在返回 ack 时就已 fsync 过）。此时若退回
+/// 旧 MANIFEST，它不认识那个新 SST，于是那批**已经承诺不丢**的数据
+/// 变得不可见 —— 直接违反契约 C1。
+///
+/// 拒绝启动则完全不同：数据一个字节都没少，只是需要人来判断。
+/// 所有文件都还在目录里，可以人工检查、可以写工具从 SST 重建 MANIFEST。
+///
+/// 这和 `wal.mbt` 对坏数据的态度差异是刻意的：WAL 尾部的半条记录是
+/// **断电常态**，截断它不损失任何已 ack 的数据；而 MANIFEST 读不懂意味着
+/// 「不知道哪些数据是有效的」，这时任何自动决策都可能丢数据。
+fn[S : Storage] Db::read_manifest(self : Db[S], name : String) -> Version raise LsmError {
+  let raw = match Storage::read_file(self.storage, name) {
+    Some(b) => b
+    None =>
+      raise LsmError::corruption(
+        "CURRENT 指向的 MANIFEST 不存在：\{name}",
+      )
+  }
+  let v = match decode_manifest(raw) {
+    Some(v) => v
+    None =>
+      raise LsmError::corruption(
+        "MANIFEST 解码失败（magic/version/CRC/结构）：\{name}",
+      )
+  }
+  if !v.check_invariants() {
+    raise LsmError::corruption(
+      "MANIFEST 语义不合法（层重叠或编号越界）：\{name}",
+    )
+  }
+  v
+}
+
+///|
+/// 目录里是否已经有数据文件（用来区分「全新库」和「元信息丢了」）。
+fn[S : Storage] Db::has_any_data_file(self : Db[S]) -> Bool raise LsmError {
+  if Storage::list_files(self.storage, SST_DIR).length() > 0 {
+    return true
+  }
+  if Storage::list_files(self.storage, WAL_DIR).length() > 0 {
+    return true
+  }
+  for f in Storage::list_files(self.storage, "") {
+    if has_prefix(f, MANIFEST_PREFIX) {
+      return true
+    }
+  }
+  false
+}
+
+///|
+/// 全新的库：建活跃 WAL，写第一份 MANIFEST 和 CURRENT。
+fn[S : Storage] Db::init_fresh(self : Db[S]) -> Unit raise LsmError {
+  // Version::new() 给的是 log_number=1、next_file_number=2。
+  let empty = empty_wal_bytes()
+  let wp = wal_path(1UL)
+  Storage::write_file(self.storage, wp, empty)
+  Storage::sync_file(self.storage, wp)
+  self.wal_bytes = empty.length()
+  self.persist_version()
+}
+
+///|
+/// 把 `self.version` 落盘，并原子切换 CURRENT。
+///
+/// 严格按 `docs/design/format.md` §4.2 的顺序，每一步都不能换位：
+///
+/// ```
+/// 1. 写 MANIFEST-<new> 全部内容
+/// 2. fsync(MANIFEST-<new>)
+/// 3. 写 CURRENT.tmp = "MANIFEST-<new>\n"
+/// 4. fsync(CURRENT.tmp)
+/// 5. rename(CURRENT.tmp, CURRENT)   ← 原子点
+/// 6. fsync(目录)                    ← 在 rename_file 内部完成
+/// 7. 删除旧 MANIFEST                ← 必须在 6 之后
+/// ```
+///
+/// 任何一步之前崩溃，CURRENT 都还指向旧 MANIFEST，而旧的 SST / WAL 都还在，
+/// 所以一定能恢复到一个一致的旧状态。**先写后删**是这条序列的全部意义。
+fn[S : Storage] Db::persist_version(self : Db[S]) -> Unit raise LsmError {
+  let num = self.version.alloc_file_number()
+  let name = manifest_path(num)
+  let raw = encode_manifest(self.version)
+  Storage::write_file(self.storage, name, raw)
+  Storage::sync_file(self.storage, name)
+  let body = @utf8.encode(name + "\n")
+  Storage::write_file(self.storage, CURRENT_TMP, body)
+  Storage::sync_file(self.storage, CURRENT_TMP)
+  Storage::rename_file(self.storage, CURRENT_TMP, CURRENT_FILE)
+  let old = self.current_manifest
+  self.current_manifest = name
+  if old != "" && old != name {
+    // 删失败不算错误：多留一个 MANIFEST 只是浪费几百字节，
+    // 而「因为删不掉就报错」会让一次成功的 flush 看起来失败了。
+    Storage::remove_file(self.storage, old) catch {
+      Io(_) => ()
+      Corruption(_) => ()
+      Closed => ()
+    }
+  }
+}
+
+///|
+/// 当前活跃 WAL 的路径（`wal/000008.wal`）。
+pub fn[S] Db::wal_name(self : Db[S]) -> String {
+  wal_path(self.version.log_number)
+}
+
+///|
+/// 当前 MANIFEST 的名字（`MANIFEST-000007`）。空串表示还没写过。
+pub fn[S] Db::manifest_name(self : Db[S]) -> String {
+  self.current_manifest
+}
+
+///|
+/// 版本快照里有几层。
+pub fn[S] Db::level_count(self : Db[S]) -> Int {
+  self.version.level_count()
+}
+
+///|
+/// 某一层有几个 SST。层不存在返回 0。
+pub fn[S] Db::level_sst_count(self : Db[S], idx : Int) -> Int {
+  self.version.level(idx).length()
+}
+
+///|
+/// 版本快照里的 `next_file_number`。测试用它验证「编号不复用」。
+pub fn[S] Db::next_file_number(self : Db[S]) -> UInt64 {
+  self.version.next_file_number
+}
+
+///|
+/// 让 `next_file_number` 跳过目录里已经存在的编号。
+fn[S : Storage] Db::bump_file_number_past_existing(
+  self : Db[S],
+) -> Unit raise LsmError {
+  let mut max = 0UL
+  for dir in [SST_DIR, WAL_DIR] {
+    for name in Storage::list_files(self.storage, dir) {
+      match parse_number_prefix(name) {
+        Some(n) =>
+          if n > max {
+            max = n
+          }
+        None => ()
+      }
+    }
+  }
+  for f in Storage::list_files(self.storage, "") {
+    if has_prefix(f, MANIFEST_PREFIX) {
+      match parse_number_prefix(f[MANIFEST_PREFIX.length():].to_owned()) {
+        Some(n) =>
+          if n > max {
+            max = n
+          }
+        None => ()
+      }
+    }
+  }
+  if self.version.next_file_number <= max {
+    self.version.next_file_number = max + 1UL
+  }
 }
 
 ///|
@@ -334,7 +599,7 @@ pub fn[S : Storage] Db::delete_deferred(
 pub fn[S : Storage] Db::sync(self : Db[S]) -> Unit raise LsmError {
   self.ensure_open()
   self.flush_pending()
-  Storage::sync_file(self.storage, WAL_FILE)
+  Storage::sync_file(self.storage, self.wal_name())
 }
 
 ///|
@@ -350,7 +615,7 @@ fn[S : Storage] Db::flush_pending(self : Db[S]) -> Unit raise LsmError {
   if self.pending.length() == 0 {
     return
   }
-  Storage::append_frames(self.storage, WAL_FILE, self.pending)
+  Storage::append_frames(self.storage, self.wal_name(), self.pending)
   let mut n = 0
   for f in self.pending {
     n = n + f.length()
@@ -369,7 +634,7 @@ fn[S : Storage] Db::append_wal_frame(
   rec : WalRecord,
 ) -> Unit raise LsmError {
   let frame = encode_frame(rec)
-  Storage::append_file(self.storage, WAL_FILE, frame)
+  Storage::append_file(self.storage, self.wal_name(), frame)
   self.wal_bytes = self.wal_bytes + frame.length()
 }
 
@@ -387,22 +652,44 @@ fn[S : Storage] Db::maybe_flush(self : Db[S]) -> Unit raise LsmError {
 }
 
 ///|
-/// 把 memtable 刷成一个 SST。
+/// 把 memtable 刷成一个 SST，并推进版本。
 ///
-/// 顺序必须是：写 SST → fsync SST → **立刻读回校验** → 才清 memtable 和 WAL。
-/// 中间任何一步失败都不能清 memtable，否则数据就没了。
-/// 「读回校验」是廉价的：`open_sst` 会校验 magic / version / 区域边界，
-/// 能在几微秒内发现「写出来的东西自己都打不开」这种灾难性 bug。
+/// 这是整个引擎里**唯一会改 MANIFEST 的地方**，也是唯一依赖
+/// 文件系统 rename 原子性的地方。顺序一步都不能换：
+///
+/// ```
+/// 1. 写 sst/<n>.sst → fsync        （数据先变成持久事实）
+/// 2. 建 wal/<m>.wal 空文件 → fsync  （新 WAL 必须存在才能被 MANIFEST 引用）
+/// 3. 更新 version（L0 加一项、log_number=m、last_seq）
+/// 4. persist_version()             （写 MANIFEST + 原子切换 CURRENT）
+/// 5. 删旧 WAL                      （CURRENT 已经不再指向它）
+/// 6. 清 memtable / pending
+/// ```
+///
+/// 崩溃点分析：
+/// - 1 之前/之中崩：MANIFEST 仍指旧 WAL，旧 WAL 里有全部记录 → 重放能恢复；
+///   半截的 SST 是孤儿，没人引用
+/// - 1 之后、4 之前崩：同上，SST 是孤儿
+/// - 4 之后崩：CURRENT 指向新 MANIFEST，它引用的 SST 已 fsync、
+///   新 WAL 也已存在 → 恢复成功；旧 WAL 是垃圾，下次启动会被清掉
+/// - 5 之后崩：与 4 之后等价
+///
+/// **memtable 只能在 4 成功之后清空。** 提前清空的话，
+/// 「SST 写好了但 MANIFEST 没写」这种状态下崩溃，重启后 SST 无人引用，
+/// 数据就真丢了。
 pub fn[S : Storage] Db::flush(self : Db[S]) -> Unit raise LsmError {
   self.ensure_open()
-  if self.mem.to_entries().length() == 0 {
+  let entries = self.mem.to_entries()
+  if entries.length() == 0 {
     return
   }
   let w = SstWriter::new()
-  for e in self.mem.to_entries() {
+  for e in entries {
     w.add(e)
   }
   let raw = w.finish()
+  // 读回校验是廉价的：`open_sst` 会校验 magic / version / 区域边界，
+  // 能在几微秒内发现「写出来的东西自己都打不开」这种灾难性 bug。
   let reader = match open_sst(raw) {
     Some(r) => r
     None =>
@@ -410,24 +697,48 @@ pub fn[S : Storage] Db::flush(self : Db[S]) -> Unit raise LsmError {
         "flush: 刚写出的 SST 无法打开（写读不一致）",
       )
   }
-  let name = sst_name(self.next_sst)
-  Storage::write_file(self.storage, name, raw)
-  // SST 必须**先落盘**才能清 WAL。反过来的话，断电后 SST 文件可能是
-  // 半截的（或者干脆不存在），而 WAL 已经清空 —— 数据就真丢了。
-  Storage::sync_file(self.storage, name)
-  // 新 SST 插到最前面：它比已有的都新
-  self.ssts.insert(0, reader)
-  self.next_sst = self.next_sst + 1
+  // 1. SST 先落盘
+  let sst_num = self.version.alloc_file_number()
+  let sp = sst_path(sst_num)
+  Storage::write_file(self.storage, sp, raw)
+  Storage::sync_file(self.storage, sp)
+  // 2. 新 WAL 空文件先建好并落盘。必须在写 MANIFEST **之前** ——
+  //    否则 MANIFEST 会引用一个还不存在的文件，崩溃后恢复直接失败。
+  let new_log = self.version.alloc_file_number()
+  let np = wal_path(new_log)
   let empty = empty_wal_bytes()
-  Storage::write_file(self.storage, WAL_FILE, empty)
-  Storage::sync_file(self.storage, WAL_FILE)
-  self.wal_bytes = empty.length()
+  Storage::write_file(self.storage, np, empty)
+  Storage::sync_file(self.storage, np)
+  // 3. 更新内存里的版本
+  let old_log = self.version.log_number
+  self.version.last_seq = self.seq
+  self.version.push_to_level(
+    0,
+    SstMeta::new(
+      sst_num,
+      raw.length().to_uint64(),
+      entries[0].key,
+      entries[entries.length() - 1].key,
+    ),
+  )
+  self.version.log_number = new_log
+  // 4. 落盘并原子切换。失败就抛错，此时 memtable 原封不动
+  self.persist_version()
+  // 5. 旧 WAL 可以删了：CURRENT 已经指向新 MANIFEST，它只认 wal/<new_log>
+  Storage::remove_file(self.storage, wal_path(old_log)) catch {
+    Io(_) => ()
+    Corruption(_) => ()
+    Closed => ()
+  }
+  // 6. 内存状态收尾
+  self.ssts.insert(0, reader)
   self.mem.clear()
   // `pending` 里的帧对应的记录全都在 memtable 里，也就全都进了刚落盘的
   // 这个 SST。SST 已经 fsync 过，所以这些帧可以安全丢弃 —— 不丢的话，
-  // 下一次 sync() 会把它们追加到已经清空的 WAL 上，重放时虽然幂等，
+  // 下一次 sync() 会把它们追加到已经换新的 WAL 上，重放时虽然幂等，
   // 但 `wal_bytes` 会凭空变大，stats 看起来像有数据没刷盘。
   self.pending.clear()
+  self.wal_bytes = empty.length()
   self.flush_count = self.flush_count + 1
 }
 
@@ -505,29 +816,86 @@ fn take_prefix(b : Bytes, n : Int) -> Bytes {
 }
 
 ///|
-/// `SST-000007` 这种名字。零填充是必须的：`list_files` 按**字节序**排序，
-/// 不填充的话 `SST-10` 会排在 `SST-9` 前面，恢复时新旧顺序就反了。
-fn sst_name(n : Int) -> String {
+///|
+/// 六位零填充的编号。
+///
+/// 零填充是必须的：`list_files` 按**字节序**排序，不填充的话
+/// `0000010.wal` 会排在 `0000009.wal` 前面，恢复时新旧顺序就反了。
+/// 六位意味着上限 999999 个文件 —— 按每次 flush 一个算，
+/// 单机每秒 flush 一次也要连续跑 11 天才会耗尽，够用。
+fn pad_num(n : UInt64) -> String {
   let digits = n.to_string()
   let mut pad = ""
   for _ in 0..<(6 - digits.length()) {
     pad = pad + "0"
   }
-  SST_PREFIX + pad + digits
+  pad + digits
 }
 
 ///|
-/// 从文件名解析编号。解析不出来返回 0（当作最旧），
-/// 这样它不会把 `next_sst` 推到一个不合理的大值上。
-fn parse_sst_number(name : String) -> Int {
-  let body = name[4:]
-  let mut n = 0
-  for c in body {
+/// `sst/000004.sst`
+fn sst_path(n : UInt64) -> String {
+  SST_DIR + "/" + pad_num(n) + ".sst"
+}
+
+///|
+/// `wal/000008.wal`
+fn wal_path(n : UInt64) -> String {
+  WAL_DIR + "/" + pad_num(n) + ".wal"
+}
+
+///|
+/// `MANIFEST-000007`
+fn manifest_path(n : UInt64) -> String {
+  MANIFEST_PREFIX + pad_num(n)
+}
+
+///|
+/// 从 `000004.sst` 这类文件名里解析出开头的数字。
+///
+/// 只认开头连续的十进制数字，遇到其他字符就停 —— 所以
+/// `000004.sst` 得到 4，`MANIFEST-000007` 要先去掉前缀。
+/// 一个数字都没有则返回 `None`（调用方应当忽略这种文件，
+/// 而不是把它当成编号 0）。
+fn parse_number_prefix(name : String) -> UInt64? {
+  let mut n = 0UL
+  let mut digits = 0
+  for c in name {
     let d = c.to_int() - '0'.to_int()
     if d < 0 || d > 9 {
-      return 0
+      break
     }
-    n = n * 10 + d
+    n = n * 10UL + d.to_uint64()
+    digits = digits + 1
   }
-  n
+  if digits == 0 {
+    None
+  } else {
+    Some(n)
+  }
+}
+
+///|
+/// 解析 CURRENT 的内容：`"MANIFEST-000007\n"` → `"MANIFEST-000007"`。
+///
+/// 拒绝任何不是 `MANIFEST-<数字>` 的内容。CURRENT 是一个**约定**，
+/// 不是「随便一个文件名」—— 放宽它只会让「CURRENT 被写坏」这种事故
+/// 变成「打开了一个莫名其妙的文件」。
+fn parse_current(text : String) -> String? {
+  // 去掉尾部换行（Windows 上可能是 \r\n）
+  let mut body = text
+  while body.length() > 0 && body.has_suffix("\n") {
+    body = body[:body.length() - 1].to_owned()
+  }
+  while body.length() > 0 && body.has_suffix("\r") {
+    body = body[:body.length() - 1].to_owned()
+  }
+  if !has_prefix(body, MANIFEST_PREFIX) {
+    return None
+  }
+  let rest = body[MANIFEST_PREFIX.length():].to_owned()
+  match parse_number_prefix(rest) {
+    Some(_) => Some(body)
+    None => None
+  }
 }

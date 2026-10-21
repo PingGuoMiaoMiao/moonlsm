@@ -266,15 +266,60 @@ index block **就是一个 §3.2 编码的 data block**，不另立格式。每�
 ### 4.3 恢复流程
 
 ```
-读 CURRENT → 得到 manifest 文件名 → 读该 MANIFEST → 校验 magic/version/CRC
+读 CURRENT → 得到 manifest 文件名 → 读该 MANIFEST → 校验 magic/version/CRC/语义
 → 得到 Version{levels, last_seq, log_number}
-→ 重放 wal/<log_number>.wal 中 seq > last_seq 的记录
+→ 按 levels 加载 sst/<n>.sst（层号升序、层内编号降序 → 「从新到旧」）
+→ 重放 wal/<log_number>.wal 的记录，覆盖在 SST 之上
 → 删除编号 < log_number 的 WAL 文件（它们的数据已在 SST 里）
+→ next_file_number 跳过目录里已存在的所有编号（清理孤儿）
 ```
 
-若 `CURRENT` 缺失或指向的文件不存在：**报 `LsmError::Corruption` 并拒绝打开**。这是唯一一个「拒绝启动」的场景——因为没有任何依据推断数据布局，硬猜会静默丢数据。
+`seq > last_seq` 不是过滤条件：WAL 里本来就只会有未 flush 的记录，而
+「同 key 取 seq 最大」由归并迭代器负责。多一层过滤只会多一处出错的地方。
 
-若 MANIFEST 的 CRC 失败：尝试同目录下编号次大的 MANIFEST；都没有才报 Corruption。这是「CURRENT 被写坏」的兜底路径。
+### 4.3.1 什么情况下拒绝启动
+
+有三种，全部报 `LsmError::Corruption`：
+
+| 情形 | 为什么拒绝 |
+|---|---|
+| `CURRENT` 缺失，但目录里已有数据文件 | 无法推断布局，硬猜会静默丢数据 |
+| `CURRENT` 内容不是 `MANIFEST-<数字>` | 同上 |
+| `CURRENT` 指向的 MANIFEST 读不出来（不存在 / magic / version / CRC / 语义不合法） | 见下 |
+
+**注意「空目录」不算异常**：一个文件都没有的目录就是新库，正常初始化。
+
+#### 为什么 MANIFEST 坏了不退回旧版本
+
+早期设计里写的是「尝试编号次大的 MANIFEST，都没有才报 Corruption」。
+实现完才发现这个兜底是**有害的**，已删除。
+
+原因是它会丢掉已经 ack 的数据。考虑这个序列：
+
+```
+1. put(a) → WAL fsync → 返回 ack（承诺不丢）
+2. put(b) → WAL fsync → 返回 ack（承诺不丢）
+3. flush：写 SST-3（含 a、b）→ 写 MANIFEST-5（引用 SST-3）→
+   切 CURRENT → 删掉旧 WAL（a、b 的唯一其他副本）
+4. 此时 MANIFEST-5 因磁盘坏块读不出来
+```
+
+如果退回 MANIFEST-2（flush 之前那份），它不认识 SST-3，于是 a 和 b
+从数据库里消失了 —— 而它们**已经返回过 ack**。这直接违反 C1。
+
+拒绝启动则完全不同：所有文件都还在，a 和 b 一个字节都没少，
+只是需要人来判断（或写工具从 SST 重建 MANIFEST）。
+
+这个取舍和 WAL 尾部截断正好相反，值得对照着看：
+
+| | WAL 尾部半条记录 | MANIFEST 读不出来 |
+|---|---|---|
+| 性质 | 断电**常态**，每次崩溃都可能出现 | 磁盘坏块 / 人为误操作 |
+| 自动处理 | 截断到最后一个完整帧 | 无 |
+| 会丢已 ack 数据吗 | **不会**（半条记录从未 ack） | **会**（退回到旧版本就丢了） |
+| 结论 | 静默处理 | 拒绝启动，交给人 |
+
+判据是同一个：**任何自动决策都不能丢已经承诺不丢的数据。**
 
 ### 4.4 为什么是全量快照而不是增量 log
 

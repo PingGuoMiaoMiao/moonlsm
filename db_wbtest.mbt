@@ -282,8 +282,8 @@ test "db: WAL 尾部有半条记录时，只丢那一条，其余完好（不 pa
   ignore(db.put(kb("b"), kb("2")))
   let good_bytes = db.wal_bytes()
   // 手工接上半帧垃圾并让它落盘，模拟「写到一半断电」
-  Storage::append_file(st, WAL_FILE, b"\x00\x00\x00\x00\x05\x01")
-  Storage::sync_file(st, WAL_FILE)
+  Storage::append_file(st, db.wal_name(), b"\x00\x00\x00\x00\x05\x01")
+  Storage::sync_file(st, db.wal_name())
   st.power_loss()
   // 恢复过程不能 panic，只能丢尾部
   let db2 = Db::open(st, 1 << 20)
@@ -300,8 +300,8 @@ test "db: WAL 文件头被改坏时重建空 WAL，而不是拒绝启动" {
   ignore(db.put(kb("a"), kb("1")))
   db.flush()
   // 把文件头改成垃圾
-  Storage::write_file(st, WAL_FILE, b"XXXX\x01\x00\x00\x00")
-  Storage::sync_file(st, WAL_FILE)
+  Storage::write_file(st, db.wal_name(), b"XXXX\x01\x00\x00\x00")
+  Storage::sync_file(st, db.wal_name())
   st.power_loss()
   // 不抛错，能起来；已 flush 的数据在 SST 里，不受影响
   let db2 = Db::open(st, 1 << 20)
@@ -336,7 +336,7 @@ test "db: 空目录开库不报错，且立刻写下 WAL 文件头" {
   assert_eq(db.sst_count(), 0)
   assert_eq(db.last_seq(), 0UL)
   assert_eq(db.wal_bytes(), 8)
-  assert_true(Storage::read_file(st, WAL_FILE) is Some(_))
+  assert_true(Storage::read_file(st, db.wal_name()) is Some(_))
 }
 
 ///|
@@ -468,4 +468,211 @@ test "db: 组提交与逐条 put 混用，seq 仍然严格单调" {
   ignore(db.put_deferred(kb("a"), kb("new")))
   db.sync()
   assert_eq(db.get(kb("a")), expect_bytes(Some("new")))
+}
+
+// ---------------------------------------------------------------------------
+// MANIFEST 与目录布局（Week 2 D3）
+//
+// 这一组测试盯的是「元信息」而不是「数据」：层信息有没有正确落盘、
+// 重启后能不能读回来、元信息坏了会怎样。
+// ---------------------------------------------------------------------------
+
+///|
+test "manifest: 新库打开后写下 CURRENT / MANIFEST / WAL 三件套" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  // CURRENT 必须存在，且内容是 MANIFEST-<数字>\n
+  let cur = match Storage::read_file(st, CURRENT_FILE) {
+    Some(b) => @utf8.decode_lossy(b)
+    None => fail("CURRENT 应存在")
+  }
+  assert_true(cur.has_suffix("\n"))
+  assert_true(cur.has_prefix("MANIFEST-"))
+  assert_eq(db.manifest_name() + "\n", cur)
+  // MANIFEST 本体可读回
+  assert_true(Storage::read_file(st, db.manifest_name()) is Some(_))
+  // 活跃 WAL 是 wal/000001.wal
+  assert_eq(db.wal_name(), "wal/000001.wal")
+  assert_true(Storage::read_file(st, "wal/000001.wal") is Some(_))
+  // 还没有 SST
+  assert_eq(db.level_sst_count(0), 0)
+  assert_eq(db.sst_count(), 0)
+}
+
+///|
+test "manifest: flush 后层信息落盘，重启后能读回" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  ignore(db.put(kb("b"), kb("2")))
+  db.flush()
+  assert_eq(db.level_sst_count(0), 1)
+  let first_sst_count = db.level_sst_count(0)
+  // 再 flush 一次，L0 应该有两个
+  ignore(db.put(kb("c"), kb("3")))
+  db.flush()
+  assert_eq(db.level_sst_count(0), 2)
+  // 断电 + 重开：层信息必须从 MANIFEST 读回来
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  assert_eq(db2.level_count(), db2.level_count()) // 至少一层
+  assert_true(db2.level_count() >= 1)
+  assert_eq(db2.level_sst_count(0), 2)
+  assert_eq(db2.sst_count(), 2)
+  assert_true(first_sst_count == 1)
+  assert_eq(db2.get(kb("a")), expect_bytes(Some("1")))
+  assert_eq(db2.get(kb("b")), expect_bytes(Some("2")))
+  assert_eq(db2.get(kb("c")), expect_bytes(Some("3")))
+}
+
+///|
+test "manifest: flush 会轮转 WAL —— 旧 WAL 被删，新编号更大" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  let old_wal = db.wal_name()
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  let new_wal = db.wal_name()
+  assert_true(old_wal != new_wal)
+  // 旧 WAL 已被删除：它的数据已经进了 SST，MANIFEST 也不再引用它
+  assert_true(Storage::read_file(st, old_wal) is None)
+  // 新 WAL 存在且是空的（只有文件头）
+  match Storage::read_file(st, new_wal) {
+    Some(b) => assert_eq(b.length(), 8)
+    None => fail("新 WAL 应存在")
+  }
+  assert_eq(Storage::list_files(st, WAL_DIR).length(), 1)
+}
+
+///|
+test "manifest: flush 后只保留一份 MANIFEST（旧的在切换后被删）" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  ignore(db.put(kb("b"), kb("2")))
+  db.flush()
+  let mut manifests = 0
+  for f in Storage::list_files(st, "") {
+    if f.has_prefix("MANIFEST-") {
+      manifests = manifests + 1
+    }
+  }
+  // 先写后删：切换成功之后旧的那份就没用了
+  assert_eq(manifests, 1)
+  assert_true(Storage::read_file(st, db.manifest_name()) is Some(_))
+}
+
+///|
+test "manifest: 文件编号全局共享且不复用" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  let n0 = db.next_file_number()
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  let n1 = db.next_file_number()
+  // 一次 flush 消耗两个号（SST + 新 WAL），再加一个 MANIFEST 号
+  assert_true(n1 > n0)
+  assert_true(n1 - n0 >= 3UL)
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  // 重启之后编号必须继续往上走，不能回到 n0 ——
+  // 否则新写的 SST 会覆盖已有文件，表现为「重启后数据变了」
+  assert_true(db2.next_file_number() >= n1)
+  ignore(db2.put(kb("b"), kb("2")))
+  db2.flush()
+  assert_true(db2.next_file_number() > n1)
+}
+
+///|
+test "manifest: CURRENT 缺失但目录里有数据 → 拒绝启动（Corruption）" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  // 只删 CURRENT，SST / WAL / MANIFEST 都还在
+  Storage::remove_file(st, CURRENT_FILE)
+  st.power_loss()
+  // 硬猜布局会静默丢数据，所以这里必须拒绝
+  assert_true(raises_lsm(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) }))
+}
+
+///|
+test "manifest: 空目录不算 Corruption —— 那是新库" {
+  let st = MemStorage::new()
+  // 从没打开过，什么都没有
+  let db = Db::open(st, 1 << 20)
+  assert_eq(db.sst_count(), 0)
+  assert_eq(db.last_seq(), 0UL)
+}
+
+///|
+test "manifest: MANIFEST 被写坏 → 拒绝启动（不回退，回退会丢已 ack 数据）" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  ignore(db.put(kb("b"), kb("2")))
+  db.flush()
+  let cur_manifest = db.manifest_name()
+  // 把当前 MANIFEST 的内容改成垃圾（CRC 必然对不上）
+  Storage::write_file(st, cur_manifest, b"GARBAGE-GARBAGE")
+  Storage::sync_file(st, cur_manifest)
+  st.power_loss()
+  // 这里**必须**拒绝启动，而不是退回某个旧版本。
+  //
+  // 回退看起来「更友好」，但会静默丢掉一批已经返回过 ack 的写入：
+  // 那些数据在新 SST 里，而旧 MANIFEST 不认识那个 SST。
+  // 拒绝启动则一个字节都没少 —— 文件都还在，人可以介入。
+  assert_true(raises_lsm(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) }))
+}
+
+///|
+test "manifest: CURRENT 内容是垃圾 → 拒绝启动" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  Storage::write_file(st, CURRENT_FILE, b"not-a-manifest\n")
+  Storage::sync_file(st, CURRENT_FILE)
+  st.power_loss()
+  assert_true(raises_lsm(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) }))
+}
+
+///|
+test "manifest: 孤儿 SST 不影响恢复，且它的编号不会被复用" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  // 手工造一个「崩溃在写完 SST、还没写 MANIFEST」的现场：
+  // 一个编号很大的 SST 文件，但 MANIFEST 里没登记它
+  let orphan_num = db.next_file_number() + 50UL
+  let w = SstWriter::new()
+  w.add({ key: kb("ghost"), value: kb("boo"), seq: 9999UL, deleted: false })
+  Storage::write_file(st, sst_path(orphan_num), w.finish())
+  Storage::sync_file(st, sst_path(orphan_num))
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  // 孤儿不在 MANIFEST 里 → 不会被加载
+  assert_eq(db2.sst_count(), 1)
+  assert_true(db2.get(kb("ghost")) is None)
+  assert_eq(db2.get(kb("a")), expect_bytes(Some("1")))
+  // 编号必须跳过孤儿，否则下一次 flush 会覆盖一个已存在的文件
+  assert_true(db2.next_file_number() > orphan_num)
+}
+
+///|
+test "manifest: seq 跨重启单调（MANIFEST 里的 last_seq 起作用）" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  let s1 = db.put(kb("a"), kb("1"))
+  db.flush()
+  // flush 会把 last_seq 写进 MANIFEST；即使 SST 和 WAL 都不含这个 seq，
+  // 重启后的新写入也必须比它大
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  assert_true(db2.last_seq() >= s1)
+  let s2 = db2.put(kb("b"), kb("2"))
+  assert_true(s2 > s1)
 }

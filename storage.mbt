@@ -66,7 +66,16 @@ pub trait Storage {
   fn file_size(Self, String) -> Int? raise LsmError
 
   ///|
-  /// 列出所有以 `prefix` 开头的文件名。用于清理崩溃残留的孤儿文件。
+  /// 列出**某个子目录**下的文件名（返回 basename，不含目录部分）。
+  ///
+  /// 参数是目录名而不是名字前缀。这个区别很重要：
+  /// 前缀过滤会把 `SST-000001` 和 `SST-000001.bak` 一起捞出来，
+  /// 而目录列举天然只给出「这个目录里真实存在的东西」。
+  ///
+  /// `dir == ""` 表示数据目录本身（只返回根下的文件，不含子目录内容）。
+  ///
+  /// 返回结果按字节序排序 —— 配合零填充的文件编号，
+  /// 「编号升序」就等于「从旧到新」，调用方不必自己排。
   fn list_files(Self, String) -> Array[String] raise LsmError
 }
 
@@ -279,17 +288,36 @@ pub impl Storage for MemStorage with fn file_size(self, name) -> Int? raise LsmE
 }
 
 ///|
-pub impl Storage for MemStorage with fn list_files(self, prefix) -> Array[
-  String,
-] raise LsmError {
+pub impl Storage for MemStorage with fn list_files(self, dir) -> Array[String] raise LsmError {
+  // 内存后端的 key 就是完整相对路径（`wal/000001.wal`），
+  // 所以「列目录」= 挑出以 `dir + "/"` 开头、且后面没有更多分隔符的 key，
+  // 再去掉目录前缀返回 basename。这样它的行为与真文件系统一致。
   let out : Array[String] = []
+  let prefix = if dir == "" { "" } else { dir + "/" }
   for k, _ in self.files {
-    if has_prefix(k, prefix) {
-      out.push(k)
+    if !has_prefix(k, prefix) {
+      continue
+    }
+    let rest = k[prefix.length():].to_owned()
+    if !contains_slash(rest) {
+      out.push(rest)
     }
   }
   out.sort_by(fn(a, b) { compare_strings(a, b) })
   out
+}
+
+///|
+/// `s` 里是否含路径分隔符。用来区分「这一层的文件」和「子目录里的文件」。
+fn contains_slash(s : String) -> Bool {
+  let b = @utf8.encode(s)
+  for i in 0..<b.length() {
+    // '/' = 47, '\\' = 92
+    if b[i].to_int() == 47 || b[i].to_int() == 92 {
+      return true
+    }
+  }
+  false
 }
 
 ///|

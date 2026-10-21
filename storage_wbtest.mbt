@@ -96,19 +96,26 @@ test "storage: remove 不存在的文件不报错" {
 }
 
 ///|
-test "storage: list_files 按前缀过滤并按字节序排序" {
+test "storage: list_files 列目录、返回 basename、按字节序排序" {
   let st = MemStorage::new()
-  Storage::write_file(st, "SST-3", b"")
-  Storage::write_file(st, "SST-1", b"")
-  Storage::write_file(st, "SST-2", b"")
-  Storage::write_file(st, "WAL-1", b"")
-  let ssts = Storage::list_files(st, "SST-")
+  // 写成乱序，验证返回结果自己会排序
+  Storage::write_file(st, "sst/000003.sst", b"")
+  Storage::write_file(st, "sst/000001.sst", b"")
+  Storage::write_file(st, "sst/000002.sst", b"")
+  Storage::write_file(st, "wal/000001.wal", b"")
+  Storage::write_file(st, "MANIFEST-000004", b"")
+  let ssts = Storage::list_files(st, "sst")
   assert_eq(ssts.length(), 3)
-  assert_eq(ssts[0], "SST-1")
-  assert_eq(ssts[1], "SST-2")
-  assert_eq(ssts[2], "SST-3")
-  assert_eq(Storage::list_files(st, "WAL-").length(), 1)
-  assert_eq(Storage::list_files(st, "NOPE").length(), 0)
+  // basename，不带目录前缀
+  assert_eq(ssts[0], "000001.sst")
+  assert_eq(ssts[1], "000002.sst")
+  assert_eq(ssts[2], "000003.sst")
+  assert_eq(Storage::list_files(st, "wal").length(), 1)
+  assert_eq(Storage::list_files(st, "nope").length(), 0)
+  // 根目录只返回根下的文件，不含子目录里的东西
+  let root = Storage::list_files(st, "")
+  assert_eq(root.length(), 1)
+  assert_eq(root[0], "MANIFEST-000004")
 }
 
 // ---------------------------------------------------------------------------

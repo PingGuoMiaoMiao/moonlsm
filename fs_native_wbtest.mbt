@@ -17,9 +17,16 @@ fn fresh_dir(tag : String) -> NativeStorage raise LsmError {
   let dir = ".moonlsm_test/" + tag
   let st = NativeStorage::new(dir)
   Storage::prepare(st)
-  // 清掉上一轮残留
+  // 清掉上一轮残留。子目录也要清 —— 新布局把 SST / WAL 放进
+  // `sst/` 和 `wal/`，只清根目录会让上一个用例的数据被下一个用例读到，
+  // 表现为「恢复时读到了本不该存在的 SST」这种极其困惑的失败。
   for name in Storage::list_files(st, "") {
     Storage::remove_file(st, name)
+  }
+  for dir in ["sst", "log.bin"] {
+    for name in Storage::list_files(st, dir) {
+      Storage::remove_file(st, dir + "/" + name)
+    }
   }
   st
 }
@@ -61,11 +68,11 @@ test "storage: NativeStorage 空文件与二进制内容" {
 ///|
 test "storage: NativeStorage append 与 file_size 一致" {
   let st = fresh_dir("append")
-  Storage::write_file(st, "wal", bytes_of_str("AAA"))
-  Storage::append_file(st, "wal", bytes_of_str("BBB"))
-  Storage::append_file(st, "wal", bytes_of_str("CC"))
-  assert_true(Storage::file_size(st, "wal") is Some(8))
-  match Storage::read_file(st, "wal") {
+  Storage::write_file(st, "log.bin", bytes_of_str("AAA"))
+  Storage::append_file(st, "log.bin", bytes_of_str("BBB"))
+  Storage::append_file(st, "log.bin", bytes_of_str("CC"))
+  assert_true(Storage::file_size(st, "log.bin") is Some(8))
+  match Storage::read_file(st, "log.bin") {
     Some(v) => assert_eq(str_of_bytes(v), "AAABBBCC")
     None => fail("wal 应存在")
   }
@@ -82,33 +89,33 @@ test "storage: NativeStorage append_frames 与逐次 append 结果完全一致" 
     bytes_of_str("AAA"), bytes_of_str(""), bytes_of_str("BB"),
     bytes_of_str("CCCC"),
   ]
-  Storage::write_file(a, "wal", bytes_of_str("HEAD"))
-  Storage::write_file(b, "wal", bytes_of_str("HEAD"))
+  Storage::write_file(a, "log.bin", bytes_of_str("HEAD"))
+  Storage::write_file(b, "log.bin", bytes_of_str("HEAD"))
   for c in chunks {
-    Storage::append_file(a, "wal", c)
+    Storage::append_file(a, "log.bin", c)
   }
-  Storage::append_frames(b, "wal", chunks)
-  let ra = match Storage::read_file(a, "wal") {
+  Storage::append_frames(b, "log.bin", chunks)
+  let ra = match Storage::read_file(a, "log.bin") {
     Some(v) => v
     None => fail("a/wal 应存在")
   }
-  let rb = match Storage::read_file(b, "wal") {
+  let rb = match Storage::read_file(b, "log.bin") {
     Some(v) => v
     None => fail("b/wal 应存在")
   }
   assert_eq(str_of_bytes(ra), str_of_bytes(rb))
   assert_eq(str_of_bytes(rb), "HEADAAABBCCCC")
   // 空批次不能创建文件，也不能改动已有内容（HEAD+AAA+BB+CCCC = 13）
-  Storage::append_frames(b, "wal", [])
-  assert_true(Storage::file_size(b, "wal") is Some(13))
+  Storage::append_frames(b, "log.bin", [])
+  assert_true(Storage::file_size(b, "log.bin") is Some(13))
 }
 
 ///|
 test "storage: NativeStorage append_frames 对不存在的文件会创建它" {
   // 与 "ab" 模式的语义保持一致：append 到不存在的文件等于新建。
   let st = fresh_dir("frames_new")
-  Storage::append_frames(st, "wal", [bytes_of_str("X"), bytes_of_str("Y")])
-  match Storage::read_file(st, "wal") {
+  Storage::append_frames(st, "log.bin", [bytes_of_str("X"), bytes_of_str("Y")])
+  match Storage::read_file(st, "log.bin") {
     Some(v) => assert_eq(str_of_bytes(v), "XY")
     None => fail("wal 应被创建")
   }
@@ -117,10 +124,10 @@ test "storage: NativeStorage append_frames 对不存在的文件会创建它" {
 ///|
 test "storage: NativeStorage sync 不改变内容，且能对不存在的文件报错" {
   let st = fresh_dir("sync")
-  Storage::write_file(st, "wal", bytes_of_str("AAA"))
-  Storage::sync_file(st, "wal")
+  Storage::write_file(st, "log.bin", bytes_of_str("AAA"))
+  Storage::sync_file(st, "log.bin")
   // sync 之后再读，内容必须一模一样
-  match Storage::read_file(st, "wal") {
+  match Storage::read_file(st, "log.bin") {
     Some(v) => assert_eq(str_of_bytes(v), "AAA")
     None => fail("wal 应存在")
   }
@@ -164,16 +171,26 @@ test "storage: NativeStorage remove 幂等" {
 }
 
 ///|
-test "storage: NativeStorage list_files 能看到刚写的文件" {
+test "storage: NativeStorage list_files 列子目录且不返回 . / .." {
   let st = fresh_dir("list")
-  Storage::write_file(st, "SST-1", b"")
-  Storage::write_file(st, "SST-2", b"")
-  Storage::write_file(st, "WAL-1", b"")
-  let ssts = Storage::list_files(st, "SST-")
+  Storage::write_file(st, "sst/000002.sst", b"")
+  Storage::write_file(st, "sst/000001.sst", b"")
+  Storage::write_file(st, "wal/000003.wal", b"")
+  Storage::write_file(st, "CURRENT", b"x")
+  let ssts = Storage::list_files(st, "sst")
   assert_eq(ssts.length(), 2)
-  assert_eq(ssts[0], "SST-1")
-  assert_eq(ssts[1], "SST-2")
-  assert_eq(Storage::list_files(st, "WAL-").length(), 1)
+  assert_eq(ssts[0], "000001.sst")
+  assert_eq(ssts[1], "000002.sst")
+  assert_eq(Storage::list_files(st, "wal").length(), 1)
+  // 真文件系统的 readdir 会返回 `.` / `..`，必须被过滤掉 ——
+  // 否则解析编号会得到 0，`next_file_number` 就算错了
+  for name in ssts {
+    assert_true(name != "." && name != "..")
+  }
+  // 根目录只有 CURRENT（sst/ 和 wal/ 是目录，不算文件）
+  let root = Storage::list_files(st, "")
+  assert_eq(root.length(), 1)
+  assert_eq(root[0], "CURRENT")
 }
 
 ///|

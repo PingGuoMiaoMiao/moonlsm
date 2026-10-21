@@ -325,6 +325,12 @@ pub impl Storage for NativeStorage with fn prepare(self) -> Unit raise LsmError 
     return
   }
   mkdir_chain(self.root)
+  // 子目录也要建：`list_files` 依赖运行时的 `moonbit_read_dir_ffi`，
+  // 它在 opendir 失败时返回 NULL，到 MoonBit 侧就是一个空指针的
+  // FixedArray —— 访问会直接段错误，不是可捕获的错误。
+  // 所以「目录一定存在」必须在这一层保证。
+  mkdir_chain(self.root + "/" + SST_DIR)
+  mkdir_chain(self.root + "/" + WAL_DIR)
 }
 
 ///|
@@ -475,9 +481,7 @@ pub impl Storage for NativeStorage with fn file_size(self, name) -> Int? raise L
 }
 
 ///|
-pub impl Storage for NativeStorage with fn list_files(self, prefix) -> Array[
-  String,
-] raise LsmError {
+pub impl Storage for NativeStorage with fn list_files(self, dir) -> Array[String] raise LsmError {
   // 没有可移植的 readdir：POSIX 是 opendir/readdir，Windows 是
   // FindFirstFile。这里用 MoonBit 运行时自带的实现（runtime/sync_io.c
   // 里的 moonbit_read_dir_ffi），它已经把两边都封好了。
@@ -489,20 +493,59 @@ pub impl Storage for NativeStorage with fn list_files(self, prefix) -> Array[
   // 只靠「先 prepare」不够：prepare 自己也可能因为权限之类的原因失败。
   // 所以这里再用一次存在性检查兜底，宁可返回空列表也不要崩。
   Storage::prepare(self)
-  let dir = self.dir()
-  if c_is_dir(dir) != 1 {
+  let target = self.subdir(dir)
+  if c_is_dir(target) != 1 {
     return []
   }
-  let names = c_read_dir(dir)
+  let names = c_read_dir(target)
   let out : Array[String] = []
   for i in 0..<names.length() {
+    // 真文件系统的 readdir 会返回 `.` / `..`，必须过滤掉。
+    // 不过滤的话 `list_files("sst")` 会给出两个假名字，
+    // 解析编号时得到 0，进而把 `next_file_number` 算错。
     let s = @utf8.decode_lossy(names[i])
-    if has_prefix(s, prefix) {
-      out.push(s)
+    if s == "." || s == ".." {
+      continue
     }
+    // 跳过子目录。`readdir` 会把 `sst/` / `wal/` 也列出来，
+    // 而 `Storage::list_files` 的契约是「这一层的**文件**」——
+    // 内存后端只可能存文件，两边语义必须一致，否则
+    // 「内存后端跑绿的用例换真文件系统就红」。
+    if c_is_dir(self.entry_path(dir, s)) == 1 {
+      continue
+    }
+    out.push(s)
   }
   out.sort_by(fn(a, b) { compare_strings(a, b) })
   out
+}
+
+///|
+/// 某个目录里一个条目的完整路径。用来做「这是文件还是子目录」的判断。
+fn NativeStorage::entry_path(
+  self : NativeStorage,
+  dir : String,
+  name : String,
+) -> Bytes {
+  let rel = if dir == "" { name } else { dir + "/" + name }
+  if self.root == "" {
+    cstr(rel)
+  } else {
+    cstr(self.root + "/" + rel)
+  }
+}
+
+///|
+/// 子目录的完整路径。`dir == ""` 就是数据目录本身。
+fn NativeStorage::subdir(self : NativeStorage, dir : String) -> Bytes {
+  if dir == "" {
+    return self.dir()
+  }
+  if self.root == "" {
+    cstr(dir)
+  } else {
+    cstr(self.root + "/" + dir)
+  }
 }
 
 ///|
