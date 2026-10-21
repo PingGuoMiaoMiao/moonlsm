@@ -11,12 +11,14 @@
 磁盘上现在有哪些文件、每层几个 SST、校验了多少条、丢了几条。
 
 用法：
-    python demo.py                       # 用默认参数，约 15 秒
+    python demo.py                       # 默认回车模式：每段讲完按一次回车
+    python demo.py --delay 20            # 固定停顿 20 秒，约 81 秒跑完
+    python demo.py --no-pause            # 不停顿，约 21 秒（测速 / 截图用）
     python demo.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe"
-    python demo.py --no-pause            # 不等待回车，方便录屏时一次跑完
 
-录屏建议：终端宽度 ≥ 100 列，字号调大，`--no-pause` 跑一遍约 15 秒，
-配上旁白正好 90 秒。
+**90 秒演示的完整分镜、逐字稿、录制前检查、可能被追问的问题，
+见 `docs/engineering/DEMO.md`。** 这个脚本只负责「让证据出现在屏幕上」，
+「什么时候说话」在那份文档里。
 """
 
 import argparse
@@ -164,6 +166,9 @@ def main():
     ap.add_argument("--pause", dest="pause", action="store_true", default=True,
                     help="每一步之间等回车（默认开启）")
     ap.add_argument("--no-pause", dest="pause", action="store_false")
+    ap.add_argument("--delay", type=float, default=0, metavar="SEC",
+                    help="用固定停顿秒数代替回车。录屏时双手可以空出来念旁白；"
+                         "也适合先试跑一遍估算总时长（约 21 + 3×SEC 秒）")
     args = ap.parse_args()
 
     data_dir = dbcli_launch.resolve_dir(args.data_dir, "./data")
@@ -172,6 +177,12 @@ def main():
     env = dbcli_launch.child_env(data_dir)
 
     def wait():
+        # --delay 优先于回车：录屏时手不用一直悬在键盘上，专心念旁白。
+        # 代价是节奏固定，讲快了会干等、讲慢了会被打断 —— 所以正式录
+        # 建议还是用回车模式（默认），--delay 更适合先试跑一遍估时长。
+        if args.delay > 0:
+            time.sleep(args.delay)
+            return
         if args.pause:
             try:
                 input("  [回车继续] ")
