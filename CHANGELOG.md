@@ -213,6 +213,34 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
 - `format.md` §6 待实现清单更新：WAL 与 MANIFEST 已标完成，补上
   「data block 级 CRC（v1.1，会 bump `version` 到 2）」
 
+**性能：scan 提速 47 倍 + 基准与参照（Week 3 D3/D4）**
+
+- `SstReader::scan_range(start, end)`：用索引做**块级剪枝**，只解落在
+  区间里的块。原来 `Db::scan` 对每个 SST 调 `entries()`，把整个文件解出来
+  再筛，数据量一大 scan 就退化成 O(整个库)
+  - 不接 `limit`：单看一个文件无法判断「前 N 条」是不是全局前 N 条，
+    限制由调用方在归并之后施加
+  - 块内过滤而不是块内二分：一个 block 只有 4 KiB / 一百多条，
+    解出来再线性筛比再写一套「块内定位 + 向后遍历」简单得多
+- CLI 两处 O(n²) 拼接：`items_json` 改用 `Buffer`（原来 500 条要拷十几 MB），
+  `esc` 加「无需转义就直接返回原串」的快路径
+  - **踩到的坑**：`Buffer::to_string()` 不是 UTF-8 解码，它把每个字节当成
+    一个码位映射出去（`[` → `U+225B`），输出一串乱码。必须走
+    `@utf8.decode_lossy(buf.to_bytes())`。单测抓不到、编译不报，
+    只有端到端跑起来才看得见，所以把拼装抽成 `items_json` 并补了 5 条单测
+- `KvPair::new`：跨包不能写结构体字面量（只读类型），而测试需要「凭空造一条」
+- `benches/python/bench_sqlite.py`：同 workload 跑一遍 SQLite，作为
+  数量级参照（不是竞品对比）
+- `docs/engineering/BENCHMARK.md`：完整数据 + 每一处瓶颈的定位过程 +
+  五条测量方法的局限（协议开销、`kill -9` 测不出漏 fsync、单次测量无中位数等）
+- 实测（20 万条，value 100 字节）：范围扫描 **1 250 → 58 834 rows/s（47×）**，
+  读 P50 0.081 → 0.060 ms，写吞吐基本不变
+- 100 万条主表：顺序写 50 212 ops/s、随机写 12 724 ops/s、
+  读 P50/P99 0.068/0.147 ms、空间放大 1.13×
+- **组提交的量化**：批次 1000 时 `sync:true` 只慢 9%；批次 1 时顺序写从
+  3 103 掉到 79 ops/s（39×）。SQLite 同条件下从 34 426 掉到 497 ops/s，
+  量级一致 —— 这是 fsync 的物理成本，不是实现问题
+
 ### 变更
 
 - `dbcli` 的 `stats` 增加 `levels` 字段（如 `[2,0,2]`），固定输出 `NUM_LEVELS` 个数字。

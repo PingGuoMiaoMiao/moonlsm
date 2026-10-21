@@ -271,8 +271,8 @@ D6 同时改掉了一处「碰巧正确」的实现：归并后内存里 SST 的
 |---|---|---|---|
 | D1 | `crash_test.py --rounds 20` | 20/20 通过 | ✅（两个种子各 10 轮） |
 | D2 | 损坏注入测试（截断 / 单字节翻转 / 文件缺失） | 不 panic，策略与 `format.md` §5.3 一致 | ✅ |
-| D3 | `bench.py --n 1000000`，出对比表 | 有 vs moonkv / SQLite 的数据 | ⬜ |
-| D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 | ⬜ |
+| D3 | `bench.py --n 1000000`，出对比表 | 有 vs moonkv / SQLite 的数据 | ✅（SQLite 已有，moonkv 未做） |
+| D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 | 🟡（scan 47×，见 BENCHMARK.md） |
 | D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 | ⬜ |
 | D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 | ⬜ |
 | D7 | 申报书 + 90 秒 demo 视频 | 提交 | ⬜ |

@@ -135,18 +135,49 @@ db.sync()!
 
 ```bash
 cd benches/python
-python model_check.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --ops 5000
-python crash_test.py   --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --rounds 20
-python bench.py        --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --n 200000
+python model_check.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe" --ops 2000 --restart-every 400
+python crash_test.py   --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe" --rounds 20
+python bench.py        --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe" --n 1000000
 ```
 
-三个脚本分别验证：
+四个脚本分别验证：
 
 | 脚本 | 验证什么 |
 |---|---|
 | `model_check.py` | 与内存 dict 逐条对拍，覆盖覆盖写 / 删除 / 墓碑 / 大 value / 前缀 key |
 | `crash_test.py` | **kill -9 后，已确认的写入一条不丢，且绝不读出半个值** |
-| `bench.py` | 写吞吐、读延迟分位、空间放大 |
+| `bench.py` | 写吞吐、读延迟分位、范围扫描、空间放大 |
+| `bench_sqlite.py` | 同 workload 跑一遍 SQLite，给上面的数字一个数量级锚点 |
+
+`moon test` 里另有 180 条单元测试，包括 9 条**损坏注入**用例（截断 / 单字节
+翻转 / 文件缺失）和一条逐字节 fuzz：SST 里任何一个字节坏掉，
+`Db::open` 要么成功、要么报 `Corruption`，绝不 panic。
+
+> 数据目录由 `MOONLSM_DATA` 环境变量指定（默认 `.moonlsm_data`），
+> 三个脚本统一用 `dbcli_launch.py` 注入，不需要也不支持 `--path` 参数。
+
+---
+
+## 性能
+
+100 万条、每批 1000 条、value 100 字节（Windows / NTFS / release 构建）：
+
+| 指标 | 数值 |
+|---|---|
+| 顺序写 | 50 212 ops/s（5.77 MB/s） |
+| 随机写（覆盖写） | 12 724 ops/s（1.46 MB/s） |
+| 读延迟 P50 / P95 / P99 | 0.068 / 0.113 / 0.147 ms |
+| 范围扫描（每次 500 行） | 32 895 rows/s |
+| 空间放大 | 1.13× |
+
+**组提交是这里最关键的一个数**：每批 1000 条只 fsync 一次，所以
+`sync:true` 只比 `sync:false` 慢 9%（46 316 vs 50 806 ops/s）；
+而如果把批次改成 1（每条都等 fsync），顺序写从 3 103 掉到 **79** ops/s ——
+39 倍。同样的 workload 下 SQLite 从 34 426 掉到 497 ops/s，量级一致，
+说明这是 fsync 的物理成本，不是实现问题。
+
+完整数据（含与 SQLite 的逐项对照、以及每一处瓶颈的定位过程）见
+[`docs/engineering/BENCHMARK.md`](docs/engineering/BENCHMARK.md)。
 
 > 注意：`kill -9` 只杀进程、不清 OS 页缓存，所以**它测不出「忘了 fsync」**。
 > 真正验证 fsync 需要 WAL 尾部截断注入或虚拟机断电。详见 [`benches/python/README.md`](benches/python/README.md)。

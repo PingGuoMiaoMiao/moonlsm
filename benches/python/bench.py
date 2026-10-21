@@ -96,7 +96,9 @@ def main():
     ap.add_argument("--reads", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--sync", action="store_true",
-                    help="写入时等 fsync 返回（真实持久化路径，慢一个数量级）")
+                    help="写入时等 fsync 返回（真实持久化路径）。"
+                         "注意：一批只 fsync 一次（组提交），所以 batch 越大，"
+                         "它和不同步的差距越小 —— 想看差距就配 --batch 1")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
