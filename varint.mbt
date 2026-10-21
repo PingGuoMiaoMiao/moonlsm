@@ -51,6 +51,24 @@ pub fn write_fixed32(buf : Buffer, value : Int) -> Unit {
 }
 
 ///|
+/// 写 2 字节小端定长整数。WAL / MANIFEST 的文件头 version 字段用它。
+pub fn write_fixed16(buf : Buffer, value : Int) -> Unit {
+  buf.write_byte((value & 0xFF).to_byte())
+  buf.write_byte(((value >> 8) & 0xFF).to_byte())
+}
+
+///|
+/// 写 4 字节小端定长整数，**无符号语义**（值域 0 .. 0xFFFFFFFF）。
+/// CRC32C 的校验和用它 —— 用 `write_fixed32` 也能写出同样的字节，
+/// 但那个函数接受的是有符号 `Int`，0xE3069283 这样的值传进去是负数，
+/// 读代码的人会以为哪里算错了。
+pub fn write_fixed32u(buf : Buffer, value : UInt64) -> Unit {
+  for i in 0..<4 {
+    buf.write_byte(((value >> (i * 8)) & 0xFFUL).to_int().to_byte())
+  }
+}
+
+///|
 /// 写 8 字节小端定长整数。footer 的 offset / size / seq 都用它。
 pub fn write_fixed64(buf : Buffer, value : UInt64) -> Unit {
   for i in 0..<8 {
@@ -117,6 +135,28 @@ pub fn read_varint64(data : Bytes, pos : Int, limit : Int) -> (UInt64, Int)? {
     shift = shift + 7
   }
   None
+}
+
+///|
+/// 从 `data[pos..]` 读 2 字节小端定长整数。
+pub fn read_fixed16(data : Bytes, pos : Int) -> Int? {
+  if pos < 0 || pos + 2 > data.length() {
+    return None
+  }
+  Some(data[pos].to_int() | (data[pos + 1].to_int() << 8))
+}
+
+///|
+/// 从 `data[pos..]` 读 4 字节小端为**无符号** 32 位值（0 .. 0xFFFFFFFF）。
+pub fn read_fixed32u(data : Bytes, pos : Int) -> UInt64? {
+  if pos < 0 || pos + 4 > data.length() {
+    return None
+  }
+  let mut v = 0UL
+  for i in 0..<4 {
+    v = v | (data[pos + i].to_uint64() << (i * 8))
+  }
+  Some(v)
 }
 
 ///|
