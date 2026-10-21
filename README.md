@@ -102,28 +102,35 @@ printf '%s\n' \
 ## API
 
 ```moonbit
-// 真文件系统（数据目录、memtable 阈值）
-let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)!
+// 这些调用会 raise，所以要么放在 `fn main raise { ... }` 里，
+// 要么自己 match 处理 LsmError。
 
-let seq = db.put(b"key", b"value")!      // 返回即代表已落盘（fsync 已成功）
+// 真文件系统（数据目录、memtable 阈值）
+let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)
+
+let seq = db.put(b"key", b"value")       // 返回即代表已落盘（fsync 已成功）
 let v = db.get(b"key")                   // Bytes?，删除也是 None
-db.delete(b"key")!
-let rows = db.scan(b"a", b"z", 100)!     // [start, end)
-db.flush()!                              // memtable -> L0，必要时触发归并
+let _ = db.delete(b"key")                // 返回 seq，不用就显式丢弃
+let rows = db.scan(b"a", b"z", 100)      // [start, end)
+db.flush()                               // memtable -> L0，必要时触发归并
 db.close()
 
 // 内存后端：同一套 API，断电语义可以在 `moon test` 里直接断言
 let mem = @moonlsm.MemStorage::new()
-let db2 = @moonlsm.Db::open(mem, 1 << 20)!
+let db2 = @moonlsm.Db::open(mem, 1 << 20)
 
 // 批量写：一批只 fsync 一次，`sync()` 返回即代表整批已落盘
-for i in 0..<200 { db.put_deferred(k, v)! }
-db.sync()!
+for i in 0..<200 {
+  db.put_deferred(k, v) |> ignore
+}
+db.sync()
 ```
 
 > **`put` 与 `put_deferred` 的失败可见性不同**：`put` 在 fsync 成功之后才改
 > memtable，失败时写入完全不可见；`put_deferred` 做不到这一点（写第一条时
 > 无法预知最后的 `sync` 会不会成功）。详见 ADR-0005。
+>
+> 完整可跑的例子见 [`examples/basic/main.mbt`](examples/basic/main.mbt)。
 
 ---
 

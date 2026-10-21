@@ -36,21 +36,27 @@ put(k, v)
 ## 示例
 
 ```moonbit
-let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)!
+let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)
 
-let seq = db.put(b"key", b"value")!   // 返回即代表已落盘（fsync 已成功）
-let v = db.get(b"key")                // Bytes?，删除也是 None
-let rows = db.scan(b"a", b"z", 100)!  // [start, end)
-db.flush()!                           // memtable -> L0，必要时触发归并
+let seq = db.put(b"key", b"value")   // 返回即代表已落盘（fsync 已成功）
+let v = db.get(b"key")               // Bytes?，删除也是 None
+let rows = db.scan(b"a", b"z", 100)  // [start, end)
+db.flush()                           // memtable -> L0，必要时触发归并
 db.close()
 ```
+
+这些调用会 raise，所以要放在 `fn main raise { ... }` 里，或者自己处理 `LsmError`。
 
 批量写走组提交，一批只 fsync 一次：
 
 ```moonbit
-for i in 0..<200 { db.put_deferred(key(i), value(i))! }
-db.sync()!                            // 返回即代表整批已落盘
+for i in 0..<200 {
+  db.put_deferred(key(i), value(i)) |> ignore
+}
+db.sync()                            // 返回即代表整批已落盘
 ```
+
+完整可跑的例子见仓库的 [`examples/basic/main.mbt`](https://github.com/PingGuoMiaoMiao/moonlsm/blob/main/examples/basic/main.mbt)。
 
 ## 性能（100 万条 · 每批 1000 · value 100 字节）
 

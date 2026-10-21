@@ -273,9 +273,9 @@ D6 同时改掉了一处「碰巧正确」的实现：归并后内存里 SST 的
 | D2 | 损坏注入测试（截断 / 单字节翻转 / 文件缺失） | 不 panic，策略与 `format.md` §5.3 一致 | ✅ |
 | D3 | `bench.py --n 1000000`，出对比表 | 有 vs moonkv / SQLite 的数据 | ✅（SQLite 已有，moonkv 未做） |
 | D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 | 🟡（scan 47×，见 BENCHMARK.md） |
-| D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 | ⬜ |
-| D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 | ⬜ |
-| D7 | 申报书 + 90 秒 demo 视频 | 提交 | ⬜ |
+| D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 | ✅（README.md + README.en.md，Mermaid 架构图） |
+| D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 | ✅（0.2.0 已上架，Server 200 OK；CI 三个 workflow） |
+| D7 | 申报书 + 90 秒 demo 视频 | 提交 | 🟡（`benches/python/demo.py` 已可跑，视频与申报书待做） |
 
 D2 的产出不只是测试，还有一张**损坏处理总表**（`format.md` §5.3）：
 按「坏在哪」分类，每类只有一个策略。判据始终是同一条 ——

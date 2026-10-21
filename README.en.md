@@ -111,29 +111,37 @@ On disk you will see `CURRENT` / `MANIFEST-*` / `wal/<n>.wal` / `sst/<n>.sst`.
 ## API
 
 ```moonbit
-// Real filesystem (data directory, memtable threshold)
-let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)!
+// These calls raise, so either put them in `fn main raise { ... }`
+// or handle LsmError yourself.
 
-let seq = db.put(b"key", b"value")!      // returning means it is already durable
+// Real filesystem (data directory, memtable threshold)
+let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)
+
+let seq = db.put(b"key", b"value")       // returning means it is already durable
 let v = db.get(b"key")                   // Bytes?, deleted keys are None too
-db.delete(b"key")!
-let rows = db.scan(b"a", b"z", 100)!     // [start, end)
-db.flush()!                              // memtable -> L0, triggers compaction if needed
+let _ = db.delete(b"key")                // returns seq; discard it explicitly
+let rows = db.scan(b"a", b"z", 100)      // [start, end)
+db.flush()                               // memtable -> L0, triggers compaction if needed
 db.close()
 
 // In-memory backend: same API, so power-loss semantics are assertable inside `moon test`
 let mem = @moonlsm.MemStorage::new()
-let db2 = @moonlsm.Db::open(mem, 1 << 20)!
+let db2 = @moonlsm.Db::open(mem, 1 << 20)
 
 // Batched writes: one fsync per batch, `sync()` returning means the whole batch is durable
-for i in 0..<200 { db.put_deferred(k, v)! }
-db.sync()!
+for i in 0..<200 {
+  db.put_deferred(k, v) |> ignore
+}
+db.sync()
 ```
 
 > **`put` and `put_deferred` differ in failure visibility**: `put` only mutates the
 > memtable after fsync succeeds, so a failed write is invisible. `put_deferred`
 > cannot offer that — when writing the first record it has no way to know whether
 > the final `sync` will succeed. See ADR-0005.
+>
+> A complete, runnable example lives in
+> [`examples/basic/main.mbt`](examples/basic/main.mbt).
 
 ---
 
