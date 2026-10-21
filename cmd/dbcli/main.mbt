@@ -11,7 +11,11 @@
 ///
 /// 协议见 benches/python/README.md。
 ///
-/// 本文件只依赖 moonbitlang/core/json 与 PingGuoMiaoMiao/moonlsm。
+/// 本文件只依赖 moonbitlang/core/json、moonbitlang/core/encoding/utf8
+/// 与 PingGuoMiaoMiao/moonlsm。
+///
+/// 用 Int 而不是 Int：`moon fmt` 在 0.1.20261016 起会把 `Int` 规范化成
+/// `Int`。写 `Int` 时新旧两版 formatter 都不改动，是个稳定的不动点。
 extern "C" fn c_getchar() -> Int = "getchar"
 
 ///|
@@ -21,8 +25,13 @@ extern "C" fn c_fflush(stream : Int) -> Int = "fflush"
 
 ///|
 /// 从 stdin 读一行（不含换行符）。EOF 返回 None。
+///
+/// **必须按字节累积，最后一次性 UTF-8 解码。**
+/// 不能每读一个字节就转成 Char —— `getchar` 返回的是单个字节，
+/// 把一个字节当 Char 等于假设 Latin-1，遇到中文（3 字节 UTF-8）
+/// 会被拆成三个字符，产出乱码。
 fn read_line() -> String? {
-  let mut out = ""
+  let buf = Buffer::Buffer()
   let mut got_any = false
   while true {
     let c = c_getchar()
@@ -36,10 +45,12 @@ fn read_line() -> String? {
     if c == 13 {
       continue
     }
-    out = out + Int::unsafe_to_char(c).to_string()
+    buf.write_byte(c.to_byte())
   }
   if got_any {
-    Some(out)
+    // lossy：非法 UTF-8 不抛异常，替换成 U+FFFD。
+    // 测试脚本只发合法 JSON，但 CLI 不该因为一个坏字节就崩掉。
+    Some(@utf8.decode_lossy(buf.to_bytes()))
   } else {
     None
   }

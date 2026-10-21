@@ -69,13 +69,19 @@
 
 **工程基础设施**
 
-- `.moon-version`：**锁定工具链版本**（`0.1.20260827`）。CI 与 crash workflow 都从这里读，
-  不装 `latest`。理由见下「已知限制」里的工具链漂移条目
+- `.moon-version`：记录项目开发与验证所用的工具链版本（`0.1.20260827`）。
+  **它锁不住 CI** —— 官方 CDN 只提供 `latest` 的二进制，带版本号的路径一律 403
 - `.github/actions/setup-moonbit`：跨平台安装 MoonBit CLI 的 composite action
-- `.github/workflows/ci.yml`：工具链读取 + 格式门禁 + 三平台 `check --deny-warn` / `test` + 多后端构建
+- `.github/workflows/ci.yml`：格式检查（告警）+ 三平台 `check --deny-warn` / `test`（阻断）+ 多后端构建
 - `.github/workflows/crash.yml`：崩溃一致性测试，PR 上需打 `crash-test` 标签才跑
 - `.githooks/pre-commit`：提交前跑 `check --deny-warn` 与 `fmt`
 - issue forms（bug / feature）+ PR 模板 + `SECURITY.md` + `CONTRIBUTING.md`
+
+**缺陷修复**
+
+- `cmd/dbcli` 的 `read_line` 原来逐字节 `Int::unsafe_to_char` 拼接字符串，
+  等于假设输入是 Latin-1。中文（3 字节 UTF-8）会被拆成三个字符产出乱码。
+  改为按字节累积 + 一次性 `@utf8.decode_lossy`，中文键值可正常往返
 
 ### 已验证
 
@@ -95,11 +101,14 @@
   完整覆盖需 L3（WAL 尾部截断注入）与 L4（VM 断电），见 ADR-0003
 - **单线程**：无并发读写，无 group commit
 - **仅小端平台**：`open()` 会检测端序，非小端直接拒绝
-- **工具链版本漂移**：`moon fmt` 的规范化规则随版本变化。`0.1.20261016` 会把
-  `Int` 重写成 `Int32`，而本项目锁定的 `0.1.20260827` 不会。因此：
-  - CI 必须用 `.moon-version` 里的版本，不能装 `latest`
-  - 用新版工具链编译本包时，`moon check --deny-warn` 可能因 `Int` 的废弃警告而失败
-  - 升级工具链（含 `Int` → `Int32` 迁移）是独立任务，见 `CONTRIBUTING.md`
+- **工具链版本漂移**：官方 CDN 只提供 `latest`，带版本号的二进制路径全部 403，
+  因此无法在 CI 里锁定版本。`0.1.20261016` 的 `moon fmt` 会把 `Int` 重写成 `Int32`，
+  而本项目验证版本 `0.1.20260827` 里**根本没有 `Int32` 这个类型**，所以代码只能写 `Int`。
+  后果：
+  - CI 的格式检查会产生 diff，因此设为**告警不阻断**（格式由本地 pre-commit hook 保证）
+  - `check --deny-warn` 在新版工具链下可能因 `Int` 的废弃警告失败——届时需要整体升级
+  - **升级不可逆**：旧版本已无法下载，升级前务必确认新版本下能编译
+  - 升级步骤见 `CONTRIBUTING.md`「工具链版本：能记录，但锁不住」
 
 ### 许可证
 

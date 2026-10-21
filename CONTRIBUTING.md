@@ -23,29 +23,53 @@
 
 | 工具 | 版本 | 检查命令 |
 |---|---|---|
-| MoonBit | **锁定版本**，见 [`.moon-version`](.moon-version)（当前 `0.1.20260827`） | `moon version --all` |
+| MoonBit | 见 [`.moon-version`](.moon-version)（当前 `0.1.20260827`）。CI 用 `latest`，两者格式规则不同，见下文 | `moon version --all` |
 | Python | `>= 3.10` | `python --version` |
 
 Python 只用于 `benches/python/` 下的测试脚本，不参与构建。运行库本身零依赖。
 
-### 工具链版本是锁定的
+### 工具链版本：能记录，但锁不住
 
-仓库根目录的 [`.moon-version`](.moon-version) 是**唯一**的版本来源，CI 和 crash workflow 都从它读取。
+仓库根目录的 [`.moon-version`](.moon-version) 记录**本项目开发与验证所用的版本**。
 
 ```bash
-cat .moon-version          # 看当前锁定版本
-moon version --all         # 看本地实际版本
+cat .moon-version          # 项目验证版本
+moon version --all         # 本地实际版本
 ```
 
-**为什么要锁**：`moon fmt` 的规范会随版本变化。实测 `0.1.20261016` 会把 `Int` 重写成 `Int32`，而 `0.1.20260827` 不会。如果 CI 装 `latest`，就会出现「本地 `moon fmt` 干净、CI 报有 diff」这种无法复现的失败——排查成本极高，收益为零。
+**为什么记录而不是锁定**：官方 CDN 只提供 `latest` 的二进制。实测
+
+```
+https://cli.moonbitlang.com/binaries/0.1.20260827/moonbit-linux-x86_64.tar.gz  →  403
+https://cli.moonbitlang.com/binaries/latest/moonbit-linux-x86_64.tar.gz        →  200
+```
+
+任何带版本号的路径都下不到，所以「在 CI 里安装指定版本」这件事**做不到**。CI 只能装 `latest`。
+
+**这带来一个必须知道的差异**：
+
+| 版本 | `Int32` 类型 | `moon fmt` 对 `Int` 的处理 |
+|---|---|---|
+| `0.1.20260827`（项目验证版本） | **不存在** | 保持 `Int` |
+| `0.1.20261016`（当前 latest） | 存在 | 重写成 `Int32` |
+
+所以本项目的代码统一写 `Int`——**因为旧版里没有 `Int32`**。CI 的 formatter 会想把它改成 `Int32`，这个差异不可能同时消除。
+
+**应对方式**：
+
+- **格式检查在 CI 里是告警，不阻断**。格式由本地 pre-commit hook 保证（用你自己的 formatter）
+- **类型检查与测试在 CI 里是阻断的**，它们不随格式化规则变化
+- CI 会打印版本对比，不一致时给 warning annotation
 
 **升级工具链是一个独立任务，不是顺手做的事**：
 
-1. 改 `.moon-version`
-2. 本地装上同版本，跑 `moon fmt` 看差异
-3. 修掉所有不兼容（例如 `Int` → `Int32` 迁移）
-4. `moon check --deny-warn` + `moon test` 全绿
-5. 单独开一个 PR，commit 类型用 `chore(toolchain)`，说明改了什么、为什么改
+1. 装新版本，`moon version --all` 确认
+2. `moon fmt`，看它把什么改成了什么（当前预期是 `Int` → `Int32`）
+3. 全局替换并修掉不兼容，`moon check --deny-warn` + `moon test` 全绿
+4. 更新 `.moon-version`
+5. 单独开 PR，commit 类型用 `chore(toolchain)`
+
+⚠️ **升级是不可逆的**：旧版本已经无法从 CDN 下载，装上新版后回不去。升级前先确认现有代码在新版本下能编译。
 
 不要在功能 PR 里顺手升级工具链——那会让 diff 里混进几百行格式变化，评审没法看。
 
@@ -58,7 +82,7 @@ cd moonlsm
 # 启用仓库自带的 git hook（会做 moon fmt 检查）
 git config core.hooksPath .githooks
 
-# 确认本地工具链版本与 .moon-version 一致
+# 对照 .moon-version 看本地版本
 moon version --all
 
 # 验证环境
