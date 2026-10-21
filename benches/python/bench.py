@@ -9,6 +9,9 @@
 
 用法：
   python bench.py --cmd "python mock_dbcli.py --path ./data" --n 200000
+  python bench.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe" --n 100000
+
+（真实现的 dbcli 没有 `--path`，数据目录走 `MOONLSM_DATA`，由 dbcli_launch.py 注入）
 """
 
 import argparse

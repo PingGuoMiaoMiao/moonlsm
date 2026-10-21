@@ -169,7 +169,7 @@ moon test
 
 ```bash
 cd benches/python
-python probe_persistence.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data"
+python probe_persistence.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe"
 ```
 
 **期望三种退出码，含义完全不同**：
@@ -182,7 +182,8 @@ python probe_persistence.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbc
 
 **为什么单独设这一关**：M0/M1 阶段跑 L4 必然全红。如果直接跑，会训练出「CI 红着也无所谓」的习惯——那比没有 CI 更危险。所以显式探测、显式跳过。
 
-**当前状态**：退出码 `1`（内存占位实现）。这是设计好的，不是 bug。
+**当前状态**：退出码 `0`（WAL 已接通）。L2 通过之后，L3 的 `--restart-every`
+才真正开始起作用 —— 之前它只能验证「不重启时语义对不对」。
 
 ---
 
@@ -191,7 +192,7 @@ python probe_persistence.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbc
 ```bash
 cd benches/python
 python model_check.py \
-  --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" \
+  --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe" \
   --ops 2000 --restart-every 500 --seed 20261021
 ```
 
@@ -207,7 +208,7 @@ python model_check.py \
 | `scan key 集合不一致` | 范围边界错（**注意：必须用字节序比较**） |
 | `重启后不一致` | WAL 重放或 MANIFEST 恢复错 |
 
-**当前状态**：内存占位实现下 `--ops 400` 在 6 个种子下 0 错误。重启校验要等 L2 通过才有意义。
+**当前状态**：`--ops 2000 --restart-every 400`，5 次重启，错误 0。
 
 ---
 
@@ -216,11 +217,14 @@ python model_check.py \
 ```bash
 cd benches/python
 python crash_test.py \
-  --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" \
-  --rounds 5 --seed 20261021
+  --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe" \
+  --rounds 20 --seed 20261021
 ```
 
-**期望**：`5/5 轮通过` + `结论: PASS`。
+**期望**：`20/20 轮通过` + `结论: PASS`。
+
+**当前状态**：20/20 通过（两个种子各 10 轮），每轮写入 2.7 万–6.5 万条，
+`丢失 0`、`半条 0`。
 
 **它怎么工作的**：写入并等响应（记入「已确认」集合）→ 再发一批不等响应 → `kill -9` → 重启 → 逐条校验。已确认的必须全在，且值完全正确；未确认的允许丢，但**不能读出半条**。
 
@@ -247,7 +251,7 @@ python crash_test.py \
 ```bash
 cd benches/python
 python bench.py \
-  --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe --path ./data" \
+  --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe" \
   --n 100000 --reads 20000
 ```
 
@@ -270,10 +274,10 @@ printf '%s\n' \
   '{"op":"get","k":"user:1"}' \
   '{"op":"scan","start":"user:","end":"user;","limit":10}' \
   '{"op":"stats"}' \
-  | ./_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data
+  | MOONLSM_DATA=./data ./_build/native/debug/build/cmd/dbcli/dbcli.exe
 ```
 
-**实测输出**（当前内存占位实现）：
+**实测输出**（Week 2 完成时的真落盘实现）：
 
 ```
 {"ok":true,"seq":1}
@@ -282,7 +286,7 @@ printf '%s\n' \
 {"ok":true,"seq":3}
 {"ok":true,"v":null}
 {"ok":true,"items":[["user:2","bob"]]}
-{"ok":true,"live_keys":1,"wal_bytes":0}
+{"ok":true,"live_keys":1,"wal_bytes":63,"ssts":0,"flushes":0,"mem_entries":2,"levels":[0,0,0]}
 ```
 
 **逐行读**：
@@ -294,9 +298,34 @@ printf '%s\n' \
 | 4 | `del user:1` 成功，seq 3 |
 | 5 | `get user:1` 返回 `null` —— **删除生效** |
 | 6 | `scan` 只剩 `user:2`，且**按字节序**返回 |
-| 7 | `live_keys: 1`，与预期一致 |
+| 7 | `live_keys: 1` 与预期一致；`wal_bytes: 63` 说明三条记录都在 WAL 里、还没刷 SST；`levels: [0,0,0]` 说明三层都是空的 |
 
-这就是这个库的全部对外行为。**如果这 7 行输出都对，说明语义层是对的；剩下的工作全在「让它断电后还能这样」。**
+再跑一次（新进程，同样的 `MOONLSM_DATA`）：
+
+```bash
+printf '%s\n' '{"op":"get","k":"user:2"}' | MOONLSM_DATA=./data ./_build/native/debug/build/cmd/dbcli/dbcli.exe
+# {"ok":true,"v":"bob"}
+```
+
+数据还在 —— 这条才是 Week 2 的真正交付。磁盘上会看到：
+
+```
+data/CURRENT            # 只有一行：MANIFEST-000002
+data/MANIFEST-000002    # 版本快照（层信息、WAL 编号、下一个可用编号）
+data/wal/000001.wal     # 未刷盘的写入
+data/sst/               # 已刷盘的 SST（这里还没 flush，所以是空的）
+```
+
+**看 compaction 在工作**（写满 4 个 L0 文件，L1 再超 1 MiB）：
+
+```bash
+# 每轮 putmany 3000 条 + flush，跑 6 轮，每轮看一次 stats
+# 实测 levels 的变化：[1,0,0] → [2,0,0] → [3,0,0] → [0,0,2] → [1,0,2] → [2,0,2]
+```
+
+第 4 轮 L0 攒够 4 个文件触发归并，输出进 L1 后又因为超过 1 MiB 直接沉到 L2 ——
+一次 flush 里做了两级归并。驱动脚本见 `benches/python/`，也可以用
+`dbcli` 的 `{"op":"flush"}` 手工复现。
 
 ---
 
@@ -308,10 +337,10 @@ printf '%s\n' \
 |---|---|---|
 | `moon check` 有报错 | L0 之前 | 修语法/类型 |
 | `moon test` 有红 | L0–L1 | 修对应模块的函数 |
-| `probe_persistence.py` 返回 `1` | **L2**（当前状态） | 写 `wal.mbt` + `manifest.mbt`，把 dbcli 换成真 `Db` |
+| `probe_persistence.py` 返回 `1` | L2 | 写 `wal.mbt` + `manifest.mbt`，把 dbcli 换成真 `Db` |
 | `probe` 返回 `0`，`model_check` 有错 | L3 | 修读写删扫描语义 |
 | `model_check` 全绿，`crash_test` 有红 | L4 | 修 fsync 顺序与恢复逻辑 |
-| L4 全绿 | **可以发布了** | 跑 L5 出数据，写 README 的 benchmark 表 |
+| L4 全绿 | **L1–L4 全通**（当前状态） | 跑 L5 出数据，写 README 的 benchmark 表 |
 
 ---
 

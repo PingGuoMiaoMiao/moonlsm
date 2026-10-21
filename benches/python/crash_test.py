@@ -11,7 +11,11 @@
   python crash_test.py --cmd "python mock_dbcli.py --path ./data --no-sync"   # 应该 FAIL
 
 把 --cmd 换成你自己的 MoonBit 实现即可（在 benches/python 目录下运行）：
-  python crash_test.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe --path ./data"
+  python crash_test.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe"
+
+真实现的 dbcli 没有 `--path` 参数：数据目录由 `MOONLSM_DATA` 环境变量指定，
+由 `dbcli_launch.py` 统一注入（它会自己决定目录，刻意不读外部同名变量 ——
+本脚本每轮都会 rmtree 数据目录，继承外部变量有可能删掉真实数据）。
 """
 
 import argparse
