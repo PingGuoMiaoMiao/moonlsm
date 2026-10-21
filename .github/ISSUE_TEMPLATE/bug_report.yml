@@ -1,0 +1,107 @@
+name: Bug 报告
+description: 报告一个 bug。如果是安全问题，请改用 SECURITY.md 里的私下渠道。
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间报告问题。
+
+        **如果是安全漏洞，请不要在这里提交** —— 见 [SECURITY.md](../blob/main/SECURITY.md) 里的私下报告渠道。
+
+        存储引擎的 bug 会吃掉用户的数据。请尽量把下面填完整，尤其是「复现步骤」和「期望行为」。
+
+  - type: input
+    id: version
+    attributes:
+      label: moonlsm 版本
+      description: 见 `moon.mod` 里的 `version` 字段
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: 构建目标
+      multiple: true
+      options:
+        - native
+        - wasm-gc
+        - wasm
+        - js
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: 运行环境
+      description: 操作系统 + 版本，MoonBit 版本（`moon version --all` 的输出）
+      placeholder: "Windows 11 23H2 / moon 0.1.20260827"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 实际发生了什么
+      description: 如果有 panic / 错误信息，请贴完整输出，不要只贴最后一行
+      placeholder: |
+        期望 put 之后 get 能读到，实际返回了 None。
+        完整错误：
+        ```
+        ...
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      description: 你认为正确的行为是什么？如果有对应的契约条款（ADR-0003 的 C1–C5），请指出来
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现步骤
+      description: |
+        能稳定复现的最小代码或命令序列。越小越好 —— 不要贴整个项目。
+      placeholder: |
+        ```bash
+        moon build --target native
+        cd benches/python
+        python model_check.py --cmd "..." --ops 100 --seed 1
+        ```
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: 严重性（你的判断）
+      options:
+        - 数据丢失 / 数据损坏（最高）
+        - 崩溃 / panic / 无法启动
+        - 功能错误（结果不对但没丢数据）
+        - 性能退化
+        - 文档错误
+        - 其他
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我搜索过已有 issue，没有重复
+          required: true
+        - label: 我使用的是最新版本（0.x 阶段只维护最新版）
+          required: true
+        - label: 这不是安全问题（安全问题走 SECURITY.md 的渠道）
+          required: true

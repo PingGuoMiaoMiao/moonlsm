@@ -1,0 +1,314 @@
+# moonlsm · 模块拆分与三周交付计划
+
+> 目标：用 MoonBit 实现一个能扛 20 轮 kill -9 的嵌入式 LSM 引擎，4–10k 行，可发布到 mooncakes。
+> 测试脚手架：`benches/python/`（三个测试脚本 + 协议 + 跨语言参考调研）
+> 磁盘格式契约：[`docs/design/format.md`](docs/design/format.md)
+> 架构决策：[`docs/adr/`](docs/adr/)
+> **方法论与流程图：[`docs/engineering/PROCESS.md`](docs/engineering/PROCESS.md)**
+>
+> 本文只管「哪天做什么」。要问「为什么这样排」「什么算做完」「从项目到产品怎么走」，看 PROCESS.md。
+
+---
+
+## 0. 参考谁（先定这个，否则会走弯路）
+
+| 用途 | 项目 | 怎么用 |
+|---|---|---|
+| **主模板：学结构与顺序** | **mini-lsm**（skyzh） | 按它的周/章顺序推进，每章先读再写。有 starter code 和测试 |
+| **查代码细节** | **goleveldb**（syndtr） | LevelDB 的 Go 移植，结构 1:1；GC 模型接近 MoonBit，比读 C++ 省力 |
+| **对标工程质量** | **Pebble**（CockroachDB） | 能跑之后，翻 `*_test.go` 补边界用例 |
+| **查文件格式** | **LevelDB 源码** | SSTable / MANIFEST 格式以它为准 |
+| 不要参考 | RocksDB、sled | RocksDB 太大；sled 长期 beta，可靠性有争议 |
+
+### mini-lsm 的哪些东西不能抄
+
+它是 Rust，下面这些是语言特有的，照搬会走偏：
+
+| mini-lsm | MoonBit 里 |
+|---|---|
+| `Arc<MemTable>`、`Arc<RwLock<T>>` | **不需要**，GC 直接共享 |
+| `Send + Sync`、生命周期标注 | **不存在**，删掉 |
+| `crossbeam_skiplist` | 自己写跳表，或先用有序数组 |
+| `bytes::Bytes` 零拷贝切片 | `Bytes` + 偏移量模拟 |
+| 多层泛型 + trait bound | MoonBit trait 更轻，别照搬抽象层次 |
+
+**能抄的**：数据结构、SSTable 布局、compaction 算法、测试设计、章节顺序。
+
+---
+
+## 1. 目录结构
+
+`moon new` 生成的是「根目录即库包」，所以所有库代码平铺在根目录，`cmd/` 下是子包。
+
+```
+moonlsm/
+├── moon.mod                 # 模块元信息（name/version/license）
+├── moon.pkg                 # 库包配置（依赖写这里）
+├── LICENSE                  # Apache-2.0
+├── README.md                # 仓库首页（首屏六块）
+├── README.mbt.md            # 会被 mooncakes 当文档页渲染
+│
+├── docs/
+│   ├── README.md            # 文档索引
+│   ├── design/format.md     # ✅ 已写：WAL/SST/MANIFEST 字节布局（已冻结）
+│   └── adr/                 # ✅ 已写：0001 单包 / 0002 WAL格式 / 0003 崩溃契约
+│
+├── types.mbt                # ✅ 已写：Key/Value/Entry/Op/WalRecord/KvPair
+├── error.mbt                # ✅ 已写：LsmError（Io/Corruption/Closed）
+├── bloom.mbt                # ✅ 已写：BloomFilter（10 bit/key, k=7）
+│
+├── memtable.mbt             # 内存有序表
+├── block.mbt                # SSTable 的 block 编解码
+├── sstable.mbt              # SST 文件读写 + 索引 + bloom
+├── iter.mbt                 # 归并迭代器（memtable + 多层 SST）
+├── wal.mbt                  # 预写日志（长度前缀 + CRC）
+├── manifest.mbt             # 版本管理（哪些 SST 属于哪一层）
+├── compaction.mbt           # 分层合并
+├── db.mbt                   # 对外 API（open/put/get/delete/scan/close）
+│
+├── *_test.mbt               # 黑盒测试（走公开 API）
+├── *_wbtest.mbt             # 白盒测试（测内部不变量）
+│
+├── cmd/
+│   └── dbcli/               # ✅ 已写：测试协议入口（给 benches/python 的三个脚本用）
+│       ├── moon.pkg
+│       └── main.mbt         # 当前是内存 Map 占位，等 db.mbt 完成后换成真 Db
+│
+└── benches/python/          # ✅ 已迁入：崩溃测试 / 对拍 / 基准 + 跨语言参考调研
+    ├── README.md            # dbcli 的 8 命令协议定义
+    ├── crash_test.py        # kill -9 崩溃一致性测试
+    ├── model_check.py       # 用内存 dict 当标准答案对拍
+    ├── bench.py             # 吞吐 / 延迟 / 空间放大
+    ├── mock_dbcli.py        # 假实现（含 --no-sync 故障注入开关）
+    └── REFERENCES.md        # LevelDB/Pebble/mini-lsm 等跨语言实现调研
+```
+
+**为什么单包多文件而不是多包？**
+MoonBit 的包边界会限制可见性，而 LSM 的模块之间耦合很紧（compaction 要同时看到 memtable 和 sstable 的内部结构）。单包多文件省掉大量 `pub` 和 import 摩擦。等稳定后再按需拆包。
+完整论证见 [`docs/adr/0001-single-package.md`](docs/adr/0001-single-package.md)。
+
+---
+
+## 2. 模块拆分
+
+依赖方向是单向的，从下往上：
+
+```
+types / error / bloom          （无依赖）
+        ↑
+      block → sstable
+        ↑        ↑
+     memtable  manifest
+        ↑        ↑
+        └── iter ┘
+             ↑
+            wal
+             ↑
+        compaction
+             ↑
+            db
+```
+
+| 文件 | 职责 | 关键数据结构 | 测试点 |
+|---|---|---|---|
+| `types.mbt` | 基础类型 | `Entry{key,value,seq}`、`Op` | — |
+| `error.mbt` | 统一错误 | `LsmError{Io,Corruption,Closed}` | — |
+| `bloom.mbt` | 读放大优化 | `BloomFilter{bits,k}` | 无误判漏（false negative 为 0） |
+| `memtable.mbt` | 内存写缓冲 | 跳表 / 有序数组 + `size` 阈值 | 覆盖写、墓碑、有序遍历、超限触发 flush |
+| `block.mbt` | SST 的最小单元 | `Block{data, restart_points}` | 前缀压缩编解码往返、坏数据不 panic |
+| `sstable.mbt` | 磁盘文件 | `Sst{path, index, bloom, first,last}` | 写入后读回一致、跨 block 边界、大 value |
+| `iter.mbt` | 归并多路有序流 | `MergeIter`（按 seq 取最新） | 同 key 多版本只出最新、墓碑被吞掉 |
+| `wal.mbt` | 崩溃恢复 | `WalRecord{seq,op}` + 长度前缀 + CRC | 截断尾部能启动、fsync 后才 ack |
+| `manifest.mbt` | 版本管理 | `Version{levels: Array[Array[SstMeta]]}` | 重启后层信息正确、原子切换 |
+| `compaction.mbt` | 合并 | `Compaction{inputs, outputs}` | 墓碑在最底层才丢、合并期间读不阻塞 |
+| `db.mbt` | 对外 API | `Db{mem, imm, version, wal, opts}` | 全部集成测试 |
+
+### 核心类型（已编译验证）
+
+```moonbit
+type Key = Bytes
+type Value = Bytes
+
+pub struct Entry {
+  key : Key
+  value : Value
+  seq : UInt64
+  deleted : Bool     // 墓碑标记，不能用「value 长度 0」代替
+}
+
+pub enum Op {
+  Put(Key, Value)
+  Delete(Key)
+}
+
+pub suberror LsmError {
+  Io(String)
+  Corruption(String)
+  Closed
+}
+```
+
+> 注意：`typealias` 在 0.9 已废弃，用 `type Alias = Type`。`pub struct` 的字段默认不可变，需要改的字段加 `mut`。
+>
+> `deleted : Bool` 是踩过一次坑之后补上的：最初只有 `key/value/seq`，想用「value 长度为 0」表示删除，
+> 但这样无法区分「写入空字符串」和「删除这个 key」——删除会失效，或者空值会凭空消失。
+> 现在 `Op::to_entry` 是唯一的转换入口，墓碑语义只在一处定义。
+
+---
+
+## 3. 对外 API
+
+只暴露 6 个方法，其余全是内部实现。**边界越窄，验收越容易过。**
+
+```moonbit
+pub struct Db { ... }
+
+pub fn open(path : String, opts : Options) -> Db raise LsmError
+pub fn put(self : Db, key : Key, value : Value) -> Unit raise LsmError
+pub fn get(self : Db, key : Key) -> Value? raise LsmError
+pub fn delete(self : Db, key : Key) -> Unit raise LsmError
+pub fn scan(self : Db, start : Key, end : Key, limit : Int) -> Array[KvPair] raise LsmError
+pub fn close(self : Db) -> Unit raise LsmError
+
+/// 测试专用：强制刷盘并 fsync。生产代码不该暴露，但 dbcli 需要。
+pub fn fsync(self : Db) -> Unit raise LsmError
+```
+
+`Options` 至少要有：`memtable_limit`、`level_ratio`、`bloom_bits_per_key`、`sync_on_write`。
+
+**关键设计**：`put` 默认不 fsync（快），`fsync` 单独暴露。dbcli 的 `sync:true` 就是调它。这样性能测试和崩溃测试能分开跑。
+
+---
+
+## 4. 三周任务
+
+### Week 1：能跑起来（MemTable → SST → 读写路径）
+
+对应 mini-lsm Week 1。**目标：`put/get/scan` 在内存 + 单个 SST 上正确工作，不要求崩溃恢复。**
+
+| 天 | 任务 | 验收 |
+|---|---|---|
+| D1 | `memtable.mbt`：有序表 + put/get/iter | `moon test` 覆盖写、墓碑用例通过 |
+| D2 | `block.mbt`：前缀压缩 + restart point 编解码 | 往返测试 1000 组随机 key 通过 |
+| D3 | `sstable.mbt`：写 SST（data block + index block + footer） | 写 1 万条后能读回 |
+| D4 | `sstable.mbt`：读 SST + 二分查 index | 随机读 1000 次全对 |
+| D5 | `bloom.mbt` 接入 SST，写时生成、读时先查 | 不存在的 key 能跳过文件 |
+| D6 | `iter.mbt`：memtable + 单 SST 的归并 | 同 key 多版本只返回最新 |
+| D7 | `db.mbt` 串起来（无 WAL、无 compaction） | `model_check.py` 能跑到 500 步不报错 |
+
+**Week 1 结束时的状态**：数据只在内存和一个 SST 里，重启就丢。这是正常的。
+
+### Week 2：能活下来（WAL + compaction + MANIFEST）
+
+对应 mini-lsm Week 2。**目标：kill -9 不丢已确认数据，数据量涨了能自动合并。**
+
+| 天 | 任务 | 验收 |
+|---|---|---|
+| D1 | `wal.mbt`：长度前缀 + CRC32 的记录格式 | 单条写入后重启能重放 |
+| D2 | `wal.mbt`：恢复时截断不完整尾部 | 手动 truncate 后能正常启动 |
+| D3 | `manifest.mbt`：记录每层有哪些 SST，原子切换 | 重启后层信息正确 |
+| D4 | `compaction.mbt`：L0 → L1 的简单合并 | 合并后数据不丢、墓碑保留 |
+| D5 | `compaction.mbt`：分层触发条件 + 后台执行 | 写 100 万条不爆内存 |
+| D6 | 墓碑只在最底层丢弃 | 「删除后重写」用例通过 |
+| D7 | 全链路联调 | `crash_test.py --rounds 5` 全绿 |
+
+**Week 2 结束时的状态**：功能完整，可以开始录 demo 了。
+
+### Week 3：能拿奖（打磨 + 展示）
+
+| 天 | 任务 | 验收 |
+|---|---|---|
+| D1 | `crash_test.py --rounds 20` | 20/20 通过 |
+| D2 | 手动截断 WAL / SST 的注入测试 | 不 panic，能降级恢复 |
+| D3 | `bench.py --n 1000000`，出对比表 | 有 vs moonkv / SQLite 的数据 |
+| D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 |
+| D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 |
+| D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 |
+| D7 | 申报书 + 90 秒 demo 视频 | 提交 |
+
+---
+
+## 5. 关键选型（提前定，别中途改）
+
+| 问题 | 建议 | 理由 |
+|---|---|---|
+| MemTable 用什么 | **先有序数组，后换跳表** | 数组能过所有正确性测试，先用它把逻辑跑通；跳表是性能优化，第 3 周再做 |
+| key 比较 | 自己写 `compare_bytes`（逐字节 + 长度） | 别依赖 String，二进制 key 必须支持 |
+| seq 作用 | 同 key 多版本取最大 seq | MVCC 的最小实现，也是墓碑判定的依据 |
+| SST 是否压缩 | **不做** | 压缩会让格式调试难度翻倍，且不影响评审核心关注点 |
+| compaction 策略 | **先 leveled，后考虑 tiered** | leveled 空间放大低、逻辑直观；tiered 写放大低但读放大高 |
+| 是否做 MVCC/事务 | **Week 3 有余力再做** | 不是核心评分点，崩溃一致性才是 |
+| 是否做 value log 分离 | **不做** | 这是 WiscKey 的优化，个人项目做不完，且会拖垮进度 |
+
+---
+
+## 6. 与测试脚手架的对接
+
+`cmd/dbcli` 必须实现 [`benches/python/README.md`](benches/python/README.md) 里的 8 个命令（put / putmany / get / del / scan / flush / stats / close）。最容易踩的坑：
+
+1. **每行输出后必须 flush stdout**，否则 Python 脚本会一直等（管道模式下 stdout 是全缓冲）
+2. **`sync:true` 的响应必须在 fsync 返回之后才发**，否则崩溃测试全废
+3. **恢复时不要 panic**，坏数据走 `LsmError::Corruption` 并降级
+4. **scan 的端点比较必须用字节序**，不能用 `String::compare`（它按长度优先，会漏掉长 key）
+
+> 坑 4 是实际踩过的：`model_check.py` 报 `最终 scan key 集合不一致 got=3 want=109`，
+> 根因就是 `String::compare` 的语义与字节序不同。现在已改用 `compare_bytes`。
+
+联调顺序：
+
+```bash
+# 1. 先用 mock 确认脚本环境正常
+cd benches/python && python mock_dbcli.py --path ./data   # 另开一个终端手测协议
+
+# 2. 换成自己的实现（先跑小规模）
+cd moonlsm && moon build --target native
+cd benches/python && python model_check.py \
+  --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --ops 500
+
+# 3. 逐级加压
+python model_check.py --ops 5000 --restart-every 1000
+python crash_test.py --rounds 20
+python bench.py --n 1000000
+```
+
+当前进度：`model_check.py --ops 400` 在 seed = 1/2/3/5/7/11 下全部 PASS（0 错误）。
+但 dbcli 仍是内存 Map 占位，`--restart-every` 与 `crash_test.py` 尚不适用。
+
+---
+
+## 7. 风险与止损
+
+| 风险 | 概率 | 止损方案 |
+|---|---|---|
+| 三周做不完 compaction | 中 | 砍到「只做 L0→L1 两层」，仍能讲清原理 |
+| WAL 恢复写不对 | 中 | 先只支持「追加写 + 全量重放」，不做 checkpoint |
+| 性能比 moonkv 还差 | 低 | 如实报告，重点讲「内存不随数据线性增长」这个结构性优势 |
+| MoonBit 语法踩坑太多 | 中 | 每个文件先写最小可编译版本，`moon check` 通过再加逻辑 |
+| 时间不够 | 高 | **优先保 Week 1 + Week 2 的 WAL**，这两个决定「能不能交」 |
+
+---
+
+## 8. 里程碑进度
+
+### M0 · 工程骨架（✅ 已完成）
+
+- [x] 模块改名 `lsm` → `moonlsm`，`moon.mod` 补齐 license / keywords / repository
+- [x] `README.md` 重写为真实文件（首屏六块 + 能力矩阵 + 明确不做什么）
+- [x] `README.mbt.md` 精简为 mooncakes 文档页短版
+- [x] 测试脚手架从工作区根目录迁入 `benches/python/`
+- [x] `cmd/dbcli` 协议壳（8 命令 + 每行 flush），内存 Map 占位
+- [x] `model_check.py` 在 6 个随机种子下 PASS
+- [x] `docs/design/format.md`（已冻结）+ 3 条 ADR
+- [ ] CHANGELOG / SECURITY / CONTRIBUTING
+- [ ] GitHub Actions CI + crash workflow
+- [ ] issue / PR 模板 + 首次 commit
+
+### 下一步（Week 1 D1）
+
+1. 清掉模板遗留的 `lsm.mbt` / `lsm_test.mbt`（占位代码）
+2. 按 `docs/design/format.md` §3.2 写 `block.mbt`，前缀压缩编解码往返测试
+3. `moon test` 全绿后进 `sstable.mbt`
+
+> 提示：本机 MoonBit 版本 `0.1.20260827`。语法细节以 `moon check` 的报错为准，别信记忆——
+> 比如 `typealias` 在这个版本已废弃，要用 `type Alias = Type`；
+> `Map::new()` 也已废弃，要用 `Map([])`；`String::compare` 按长度优先，二进制 key 必须用 `compare_bytes`。

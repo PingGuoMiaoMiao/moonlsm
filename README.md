@@ -1,0 +1,130 @@
+# moonlsm
+
+**MoonBit 生态里的嵌入式 LSM 存储引擎。**
+
+![CI](https://github.com/chendev/moonlsm/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![Status](https://img.shields.io/badge/status-WIP-orange)
+
+> 社区项目，非 MoonBit 官方出品。`moon` 前缀只是沿用社区命名惯例（moondb / moonrpc / moongql）。
+
+---
+
+## 为什么存在
+
+MoonBit 生态里现有的 KV 存储都是 **Bitcask** 风格：一个追加文件 + 一份全量内存索引。数据量一大，内存就随数据线性增长，也没有分层合并。
+
+真正的 **LSM-tree**（memtable + SSTable + compaction）在 MoonBit 里还是空白。
+
+moonlsm 要做的，就是把这个空白补上——而且**把崩溃一致性测明白**，这是大多数个人实现最容易含糊过去的地方。
+
+---
+
+## 设计
+
+```
+put(k, v)
+   ├─→ WAL（顺序追加，崩溃后重放）
+   └─→ MemTable（内存有序表）
+          └─ flush ─→ L0 SSTable
+                        └─ compaction ─→ L1 → L2 ...
+```
+
+- **写**：先写 WAL，再进 MemTable。MemTable 满了整块刷成 L0 SSTable。
+- **读**：MemTable → L0 → L1 → L2，每层先查 Bloom filter 跳过无关文件。
+- **合并**：后台 compaction 逐层合并，丢弃被覆盖的旧值和已过期的墓碑。
+
+详细字节布局见 [`docs/design/format.md`](docs/design/format.md)。
+
+---
+
+## 快速开始
+
+```bash
+moon check          # 类型检查
+moon test           # 单元测试
+moon run cmd/main   # 跑一下
+```
+
+---
+
+## API（设计稿，尚未全部实现）
+
+```moonbit
+let db = @moonlsm.open("data")!
+db.put(b"key", b"value")!
+let v = db.get(b"key")!          // Bytes?
+db.delete(b"key")!
+let rows = db.scan(b"a", b"z", 100)!
+db.close()!
+```
+
+---
+
+## 能力矩阵
+
+| 能力 | 状态 |
+|---|---|
+| 点查 / 写入 / 删除 | 设计中 |
+| 范围扫描 | 设计中 |
+| WAL 崩溃恢复 | 设计中 |
+| 分层 compaction | 设计中 |
+| Bloom filter | ✅ 已实现 |
+| 内存有序表 | ✅ 已实现（有序数组，后续换跳表） |
+
+### 明确不做
+
+- **不做事务**（无 MVCC、无快照隔离）
+- **不做压缩**（SSTable 明文存储）
+- **不做加密、不做鉴权**（假定单进程独占目录）
+- **不做分布式**（这是嵌入式库，不是数据库服务）
+
+把「不做什么」写清楚，比列一堆「计划做什么」更有用。
+
+---
+
+## 测试
+
+除了 `moon test`，还有一套**外部崩溃一致性测试**（Python 驱动，通过 `cmd/dbcli` 的行 JSON 协议对接）：
+
+```bash
+cd benches/python
+python model_check.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --ops 5000
+python crash_test.py   --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --rounds 20
+python bench.py        --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data" --n 200000
+```
+
+三个脚本分别验证：
+
+| 脚本 | 验证什么 |
+|---|---|
+| `model_check.py` | 与内存 dict 逐条对拍，覆盖覆盖写 / 删除 / 墓碑 / 大 value / 前缀 key |
+| `crash_test.py` | **kill -9 后，已确认的写入一条不丢，且绝不读出半个值** |
+| `bench.py` | 写吞吐、读延迟分位、空间放大 |
+
+> 注意：`kill -9` 只杀进程、不清 OS 页缓存，所以**它测不出「忘了 fsync」**。
+> 真正验证 fsync 需要 WAL 尾部截断注入或虚拟机断电。详见 [`benches/python/README.md`](benches/python/README.md)。
+
+---
+
+## 路线图
+
+| 版本 | 目标 |
+|---|---|
+| v0.1.0 | 比赛版：crash 20/20、model_check 5000 步 0 错、发布到 mooncakes |
+| v0.2.0 | 可嵌入：API 冻结草案、examples 可跑、三后端构建通过 |
+| v0.3.0 | 可观测：stats/metrics、bench 可复现 |
+| v0.5.0 | API 冻结：语义化版本承诺、迁移指南 |
+| v1.0.0 | 产品：多后端抽象、性能回归门禁、外部用户 |
+
+开发模型（为什么用门禁式增量，而不是纯瀑布）见 [`docs/design/development-model.md`](docs/design/development-model.md)。
+
+---
+
+## 参考
+
+设计参考 LevelDB / mini-lsm，工程实践对标 Pebble。关键决策记录在 [`docs/adr/`](docs/adr/)。
+
+## License
+
+Apache-2.0

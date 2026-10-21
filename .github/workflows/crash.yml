@@ -1,0 +1,121 @@
+name: 崩溃一致性
+
+# 崩溃测试耗时长（每轮 2–5 秒 × 多轮）且需要 native 构建，
+# 不适合挂在每次 PR 上。触发条件：
+#   - push 到 main：门禁，保证主干始终满足 durability 契约
+#   - PR 带 crash-test 标签：改动了 WAL / MANIFEST / fsync 顺序时必须跑
+#   - 手动触发：排查问题
+#
+# 这个 workflow 的通过与否，直接对应 ADR-0003 的契约 C1–C5。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [labeled, synchronize]
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "崩溃测试轮数"
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crash-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ROUNDS: ${{ github.event.inputs.rounds || '5' }}
+
+jobs:
+  crash:
+    name: 崩溃测试 / ${{ matrix.os }}
+    # PR 上只在打了 crash-test 标签时跑
+    if: |
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'crash-test')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-moonbit
+
+      - name: 构建 native（release）
+        run: moon build --target native --release
+
+      - name: 定位 dbcli 可执行文件
+        id: locate
+        shell: bash
+        run: |
+          if [ -f _build/native/release/build/cmd/dbcli/dbcli.exe ]; then
+            BIN=_build/native/release/build/cmd/dbcli/dbcli.exe
+          else
+            BIN=_build/native/release/build/cmd/dbcli/dbcli
+          fi
+          if [ ! -x "$BIN" ]; then
+            echo "::error::找不到 dbcli 可执行文件"
+            find _build -name 'dbcli*' || true
+            exit 1
+          fi
+          echo "bin=$(pwd)/$BIN" >> "$GITHUB_OUTPUT"
+          echo "找到: $BIN"
+
+      # ---------------------------------------------------------------------
+      # 探测：当前实现是否已经支持持久化？
+      #
+      # M0/M1 阶段 dbcli 是内存占位实现，跑崩溃测试必然全红。
+      # 让它红着不管，会训练出「习惯性忽略 CI 红色」的坏习惯 ——
+      # 那比没有 CI 更危险。所以显式探测、显式跳过。
+      # ---------------------------------------------------------------------
+      - name: 探测持久化能力
+        id: probe
+        working-directory: benches/python
+        shell: bash
+        run: |
+          set +e
+          python probe_persistence.py --cmd "${{ steps.locate.outputs.bin }} --path ./data"
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "supported=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" -eq 1 ]; then
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::引擎尚未支持持久化（M0 骨架期），跳过崩溃测试。WAL 落地后此步会自动转为执行。"
+          else
+            echo "::error::dbcli 无法启动，这不是「尚未实现」，是坏掉了。"
+            exit 1
+          fi
+
+      - name: 正确性对拍
+        if: steps.probe.outputs.supported == 'true'
+        working-directory: benches/python
+        run: |
+          python model_check.py \
+            --cmd "${{ steps.locate.outputs.bin }} --path ./data" \
+            --ops 2000 --restart-every 500 --seed 20261021
+
+      - name: 崩溃一致性（kill -9）
+        if: steps.probe.outputs.supported == 'true'
+        working-directory: benches/python
+        run: |
+          python crash_test.py \
+            --cmd "${{ steps.locate.outputs.bin }} --path ./data" \
+            --rounds "$ROUNDS" --seed 20261021
+
+      - name: 上传失败现场
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crash-failure-${{ matrix.os }}
+          path: |
+            benches/python/data/
+            benches/python/probe-data/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/chendev/moonlsm/security/advisories/new
+    about: 不要用公开 issue 报告安全问题。请走 Security Advisories，或见 SECURITY.md。
+  - name: 设计讨论 / 提问
+    url: https://github.com/chendev/moonlsm/discussions
+    about: 「这样设计好不好」「为什么不用 XX」这类问题适合在 Discussions 里聊。

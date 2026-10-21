@@ -1,0 +1,101 @@
+name: CI
+
+# 触发策略：
+#   - push 到 main：必须全绿，这是「可发布」的门禁
+#   - PR：必须全绿才能合并
+#   - 手动：排查问题时用
+#
+# 不在这里跑崩溃测试 —— 那个耗时长且需要 native 构建，
+# 放在 crash.yml 里，只在 main 与手动触发时跑。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 最小权限：CI 只需要读代码
+permissions:
+  contents: read
+
+# 同一分支连续推送时取消旧运行，省额度也避免「旧的失败挡住新的成功」
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 格式门禁：最先跑，因为它最快，失败得也最快
+  # ---------------------------------------------------------------------------
+  fmt:
+    name: 格式
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-moonbit
+
+      - name: moon fmt 后必须无 diff
+        shell: bash
+        run: |
+          moon fmt
+          if ! git diff --exit-code --quiet; then
+            echo "::error::代码未格式化。请在本地运行 moon fmt 后重新提交。"
+            git diff
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 类型检查与单元测试：三平台矩阵
+  #
+  # Windows 也跑，因为原生 IO 行为差异（路径分隔符、文件锁、
+  # rename 语义）正是存储引擎最容易出平台 bug 的地方。
+  # ---------------------------------------------------------------------------
+  test:
+    name: 检查与测试 / ${{ matrix.os }}
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-moonbit
+
+      - name: 类型检查（警告即失败）
+        run: moon check --deny-warn
+
+      - name: 单元测试
+        run: moon test
+
+  # ---------------------------------------------------------------------------
+  # 多后端构建
+  #
+  # native 只在 Linux / macOS 跑：Windows 上 native 后端需要 MSVC 工具链，
+  # 配置成本高于收益，而 Windows 的 check + test 已经覆盖了语义层面。
+  # ---------------------------------------------------------------------------
+  build:
+    name: 构建 / ${{ matrix.target }} @ ${{ matrix.os }}
+    needs: fmt
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: wasm-gc
+          - os: ubuntu-latest
+            target: js
+          - os: ubuntu-latest
+            target: native
+          - os: macos-latest
+            target: native
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-moonbit
+
+      - name: moon build --target ${{ matrix.target }}
+        run: moon build --target ${{ matrix.target }}

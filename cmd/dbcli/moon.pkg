@@ -1,0 +1,6 @@
+import {
+  "moonbitlang/core/json",
+  "chendev/moonlsm",
+}
+
+pkgtype(kind: "executable")

@@ -1,0 +1,24 @@
+# 构建产物
+_build/
+target/
+target
+
+# MoonBit 依赖与工具缓存
+.mooncakes/
+.moonagent/
+
+# 测试脚本产生的数据目录
+benches/python/data/
+benches/python/probe-data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

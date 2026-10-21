@@ -1,0 +1,18 @@
+# 统一换行符，避免 Windows 贡献者提交时产生整文件 diff
+* text=auto eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+
+# Git 会把 .mbt 当未知类型，显式声明为文本以便 diff
+*.mbt text
+*.mbti text
+*.pkg text
+*.mod text
+
+# 测试数据目录是运行时产物，不做 diff 高亮
+benches/python/data/** -text
+benches/python/probe-data/** -text

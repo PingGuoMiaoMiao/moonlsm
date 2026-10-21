@@ -1,0 +1,41 @@
+name: "Setup MoonBit"
+description: "安装 MoonBit CLI 并预热依赖注册表。跨 Linux / macOS / Windows。"
+
+# 安装方式取自 moonbitlang/core 官方仓库的 .github/actions/setup：
+#   *nix  : install/unix.sh（可传版本号）
+#   Windows: install/powershell.ps1（版本走 MOONBIT_INSTALL_VERSION 环境变量）
+# 两边的 bin 目录都必须显式追加到 GITHUB_PATH，否则后续 step 找不到 moon。
+
+inputs:
+  version:
+    description: "MoonBit CLI 版本。默认 latest；可选 nightly 或具体版本号（如 0.1.20260827）"
+    required: false
+    default: "latest"
+
+runs:
+  using: "composite"
+  steps:
+    - name: 安装 MoonBit CLI（Linux / macOS）
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash -s "${{ inputs.version }}"
+        echo "$HOME/.moon/bin" >> "$GITHUB_PATH"
+
+    - name: 安装 MoonBit CLI（Windows）
+      if: runner.os == 'Windows'
+      shell: powershell
+      env:
+        MOONBIT_INSTALL_VERSION: ${{ inputs.version }}
+      run: |
+        Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+        irm https://cli.moonbitlang.com/install/powershell.ps1 | iex
+        "$env:USERPROFILE\.moon\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+    - name: 校验安装
+      shell: bash
+      run: moon version --all
+
+    - name: 更新依赖注册表
+      shell: bash
+      run: moon update
