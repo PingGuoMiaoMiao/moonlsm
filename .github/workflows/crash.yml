@@ -47,6 +47,14 @@ jobs:
 
       - uses: ./.github/actions/setup-moonbit
 
+      # ubuntu-latest 上没有 `python` 命令，只有 `python3`。不装这一步，
+      # 下面的 `python xxx.py` 会以 127 退出，而 `set +e` 会把它吞掉，
+      # 最后走进「dbcli 无法启动」的 else 分支 —— 把一个环境问题
+      # 误诊成引擎问题。显式装一个，让 `python` 这个名字确实可用。
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: 构建 native（release）
         run: moon build --target native --release
 
@@ -80,7 +88,9 @@ jobs:
         shell: bash
         run: |
           set +e
-          python probe_persistence.py --cmd "${{ steps.locate.outputs.bin }} --path ./data"
+          python probe_persistence.py \
+            --cmd "${{ steps.locate.outputs.bin }}" \
+            --data-dir ./data
           code=$?
           set -e
           if [ "$code" -eq 0 ]; then
@@ -88,8 +98,11 @@ jobs:
           elif [ "$code" -eq 1 ]; then
             echo "supported=false" >> "$GITHUB_OUTPUT"
             echo "::notice::引擎尚未支持持久化（M0 骨架期），跳过崩溃测试。WAL 落地后此步会自动转为执行。"
+          elif [ "$code" -eq 127 ]; then
+            echo "::error::python 命令不可用（exit 127）。这是 CI 环境问题，不是引擎问题。"
+            exit 1
           else
-            echo "::error::dbcli 无法启动，这不是「尚未实现」，是坏掉了。"
+            echo "::error::dbcli 无法启动（exit $code），这不是「尚未实现」，是坏掉了。"
             exit 1
           fi
 
@@ -98,7 +111,8 @@ jobs:
         working-directory: benches/python
         run: |
           python model_check.py \
-            --cmd "${{ steps.locate.outputs.bin }} --path ./data" \
+            --cmd "${{ steps.locate.outputs.bin }}" \
+            --data-dir ./data \
             --ops 2000 --restart-every 500 --seed 20261021
 
       - name: 崩溃一致性（kill -9）
@@ -106,7 +120,8 @@ jobs:
         working-directory: benches/python
         run: |
           python crash_test.py \
-            --cmd "${{ steps.locate.outputs.bin }} --path ./data" \
+            --cmd "${{ steps.locate.outputs.bin }}" \
+            --data-dir ./data \
             --rounds "$ROUNDS" --seed 20261021
 
       - name: 上传失败现场
