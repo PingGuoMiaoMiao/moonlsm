@@ -29,13 +29,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v5
 
-      - name: Set up MoonBit
-        run: |
-          curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash
-          echo "$HOME/.moon/bin" >> $GITHUB_PATH
+      - name: 读取锁定的工具链版本
+        id: ver
+        run: echo "version=$(tr -d ' \t\r\n' < .moon-version)" >> "$GITHUB_OUTPUT"
 
-      - name: Update MoonBit dependencies
-        run: |
-            moon version --all
-            moon update
-            
+      # 复用仓库自己的 composite action，保证与 CI / crash workflow
+      # 用同一个锁定版本（见 .moon-version）。这里不重复安装逻辑，
+      # 否则版本会漂移成「三处各写一遍、各写一个版本」。
+      - name: Set up MoonBit
+        uses: ./.github/actions/setup-moonbit
+        with:
+          version: ${{ steps.ver.outputs.version }}
+
+      - name: 打印环境信息
+        run: moon version --all

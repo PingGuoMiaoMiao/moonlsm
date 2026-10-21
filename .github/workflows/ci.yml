@@ -25,15 +25,46 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # 工具链版本锁定
+  #
+  # 不装 latest。0.1.20261016 的 moon fmt 会把 `Int` 规范化成 `Int32`，
+  # 而 0.1.20260827 不会 —— 装 latest 会导致「本地 fmt 干净、CI fmt 有 diff」
+  # 这种无法复现的失败。
+  #
+  # 版本号唯一的来源是仓库根目录的 .moon-version。
+  # 升级工具链是一个需要单独提交、单独验证的任务，不是随 CI 浮动。
+  # ---------------------------------------------------------------------------
+  toolchain:
+    name: 读取工具链版本
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        shell: bash
+        run: |
+          V=$(tr -d ' \t\r\n' < .moon-version)
+          if [ -z "$V" ]; then
+            echo "::error::.moon-version 为空"
+            exit 1
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "锁定工具链版本: $V"
+
+  # ---------------------------------------------------------------------------
   # 格式门禁：最先跑，因为它最快，失败得也最快
   # ---------------------------------------------------------------------------
   fmt:
     name: 格式
+    needs: toolchain
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-moonbit
+        with:
+          version: ${{ needs.toolchain.outputs.version }}
 
       - name: moon fmt 后必须无 diff
         shell: bash
@@ -53,7 +84,7 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: 检查与测试 / ${{ matrix.os }}
-    needs: fmt
+    needs: [toolchain, fmt]
     strategy:
       fail-fast: false
       matrix:
@@ -63,6 +94,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-moonbit
+        with:
+          version: ${{ needs.toolchain.outputs.version }}
 
       - name: 类型检查（警告即失败）
         run: moon check --deny-warn
@@ -78,7 +111,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build:
     name: 构建 / ${{ matrix.target }} @ ${{ matrix.os }}
-    needs: fmt
+    needs: [toolchain, fmt]
     strategy:
       fail-fast: false
       matrix:
@@ -96,6 +129,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-moonbit
+        with:
+          version: ${{ needs.toolchain.outputs.version }}
 
       - name: moon build --target ${{ matrix.target }}
         run: moon build --target ${{ matrix.target }}

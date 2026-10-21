@@ -23,10 +23,31 @@
 
 | 工具 | 版本 | 检查命令 |
 |---|---|---|
-| MoonBit | `>= 0.1.20260827` | `moon version` |
+| MoonBit | **锁定版本**，见 [`.moon-version`](.moon-version)（当前 `0.1.20260827`） | `moon version --all` |
 | Python | `>= 3.10` | `python --version` |
 
 Python 只用于 `benches/python/` 下的测试脚本，不参与构建。运行库本身零依赖。
+
+### 工具链版本是锁定的
+
+仓库根目录的 [`.moon-version`](.moon-version) 是**唯一**的版本来源，CI 和 crash workflow 都从它读取。
+
+```bash
+cat .moon-version          # 看当前锁定版本
+moon version --all         # 看本地实际版本
+```
+
+**为什么要锁**：`moon fmt` 的规范会随版本变化。实测 `0.1.20261016` 会把 `Int` 重写成 `Int32`，而 `0.1.20260827` 不会。如果 CI 装 `latest`，就会出现「本地 `moon fmt` 干净、CI 报有 diff」这种无法复现的失败——排查成本极高，收益为零。
+
+**升级工具链是一个独立任务，不是顺手做的事**：
+
+1. 改 `.moon-version`
+2. 本地装上同版本，跑 `moon fmt` 看差异
+3. 修掉所有不兼容（例如 `Int` → `Int32` 迁移）
+4. `moon check --deny-warn` + `moon test` 全绿
+5. 单独开一个 PR，commit 类型用 `chore(toolchain)`，说明改了什么、为什么改
+
+不要在功能 PR 里顺手升级工具链——那会让 diff 里混进几百行格式变化，评审没法看。
 
 ### 首次配置
 
@@ -37,9 +58,12 @@ cd moonlsm
 # 启用仓库自带的 git hook（会做 moon fmt 检查）
 git config core.hooksPath .githooks
 
+# 确认本地工具链版本与 .moon-version 一致
+moon version --all
+
 # 验证环境
-moon check          # 类型检查
-moon test           # 跑单元测试
+moon check --deny-warn   # 类型检查，零警告
+moon test                # 跑单元测试
 moon build --target native
 ```
 

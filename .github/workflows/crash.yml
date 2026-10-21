@@ -45,7 +45,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: 读取锁定的工具链版本
+        id: ver
+        shell: bash
+        run: |
+          V=$(tr -d ' \t\r\n' < .moon-version)
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
       - uses: ./.github/actions/setup-moonbit
+        with:
+          version: ${{ steps.ver.outputs.version }}
 
       - name: 构建 native（release）
         run: moon build --target native --release
