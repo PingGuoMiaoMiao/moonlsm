@@ -58,7 +58,7 @@
 **`moon` —— 生态标识**
 - mooncakes 上搜 `moon` 能带出这个包，进入生态流量池
 - 与 `moonbitlang/core`、`moonkv`、`moonjournalkit` 形成命名一致性，用户一眼知道这是同生态的
-- 不写全 `moonbit`：包名已经带命名空间 `chendev/moonlsm`，再写一遍是冗余
+- 不写全 `moonbit`：包名已经带命名空间 `PingGuoMiaoMiao/moonlsm`，再写一遍是冗余
 
 **`lsm` —— 技术身份**
 - 这是**算法名**，不是产品名。用户搜 `lsm` / `lsm-tree` 时能命中
@@ -70,24 +70,35 @@
 - MoonBit 包名规范本身偏好小写单词拼接
 
 **与仓库名一致**
-- GitHub 仓库 `chendev/moonlsm` = mooncakes 包 `chendev/moonlsm` = 本地目录 `moonlsm`
+- GitHub 仓库 `PingGuoMiaoMiao/moonlsm` = mooncakes 包 `PingGuoMiaoMiao/moonlsm` = 本地目录 `moonlsm`
 - 三处一致意味着：issue 里贴路径、README 里写安装命令、`git clone` 后 `cd`，都不用换算
 
 ### 1.4 仓库元信息（发布前必须填对）
 
 ```toml
 # moon.mod
-name = "chendev/moonlsm"
+name = "PingGuoMiaoMiao/moonlsm"
 version = "0.1.0"
-repository = "https://github.com/chendev/moonlsm"
-license = "Apache-2.0"
+repository = "https://github.com/PingGuoMiaoMiao/moonlsm"
+license = "MIT"
 keywords = ["lsm", "storage", "database", "embedded", "wal", "key-value"]
 preferred_target = "native"
 description = "Embedded LSM-tree storage engine for MoonBit"
 ```
 
-**为什么是 Apache-2.0 而不是 MIT**
-Apache-2.0 显式授予专利许可，企业用户法务更容易通过。存储引擎这类「会被嵌进别人产品」的库，专利条款不是形式主义。代价是文件更长、需要在源文件加声明（本项目规模下暂不逐文件加，只在 LICENSE 与 README 标注）。
+**为什么选 MIT，以及它的代价**
+
+MIT 只有约 170 词，是生态里理解成本最低的许可证。贡献者不用读完就知道能拿它做什么——对一个目标是「被尽可能多的人用起来」的项目，这个门槛越低越好。
+
+**代价要说清楚**：MIT **没有显式的专利授权条款**。Apache-2.0 第 3 条（专利许可）和第 4 条（专利诉讼时的终止条款）对企业法务更友好。存储引擎这类「会被嵌进别人产品」的库，专利条款本来不是形式主义。
+
+判断依据：本阶段的目标是**先被人用起来**，而不是先处理企业采购的法务流程。如果将来真的出现企业用户提出专利顾虑，再换。
+
+**换许可证的注意事项**（重要，容易踩）：
+
+- 许可证变更需要**全部版权人同意**。单人项目没有这个障碍，多贡献者项目就很麻烦——所以这类决定越早定越好。
+- **已发布的版本对已获取者仍然按原许可证**。你改成 Apache-2.0，不能要求之前拿到 MIT 版本的人遵守新条款。
+- 所以「先 MIT，将来有需要再加专利条款」在单人项目下可行，但必须在 CHANGELOG 里记一笔，让使用者能追溯。
 
 **GitHub 仓库的 About 与 Topics**
 

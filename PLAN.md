@@ -44,7 +44,7 @@
 moonlsm/
 ├── moon.mod                 # 模块元信息（name/version/license）
 ├── moon.pkg                 # 库包配置（依赖写这里）
-├── LICENSE                  # Apache-2.0
+├── LICENSE                  # MIT
 ├── README.md                # 仓库首页（首屏六块）
 ├── README.mbt.md            # 会被 mooncakes 当文档页渲染
 │

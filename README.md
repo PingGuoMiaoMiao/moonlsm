@@ -2,8 +2,8 @@
 
 **MoonBit 生态里的嵌入式 LSM 存储引擎。**
 
-![CI](https://github.com/chendev/moonlsm/actions/workflows/ci.yml/badge.svg)
-![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+![CI](https://github.com/PingGuoMiaoMiao/moonlsm/actions/workflows/ci.yml/badge.svg)
+![License](https://img.shields.io/badge/license-MIT-blue)
 ![Status](https://img.shields.io/badge/status-WIP-orange)
 
 > 社区项目，非 MoonBit 官方出品。`moon` 前缀只是沿用社区命名惯例（moondb / moonrpc / moongql）。
@@ -41,10 +41,29 @@ put(k, v)
 ## 快速开始
 
 ```bash
-moon check          # 类型检查
-moon test           # 单元测试
-moon run cmd/main   # 跑一下
+moon check                        # 类型检查（零警告）
+moon test                         # 单元测试
+moon build --target native        # 构建 dbcli
 ```
+
+十秒看到它在工作（管道喂 JSON）：
+
+```bash
+printf '%s\n' \
+  '{"op":"put","k":"user:1","v":"alice","sync":true}' \
+  '{"op":"get","k":"user:1"}' \
+  '{"op":"scan","start":"user:","end":"user;","limit":10}' \
+  | ./_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data
+```
+
+```
+{"ok":true,"seq":1}
+{"ok":true,"v":"alice"}
+{"ok":true,"items":[["user:1","alice"]]}
+```
+
+> 当前 dbcli 是内存占位实现，重启后数据会丢。完整的验收步骤见
+> [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md)。
 
 ---
 
@@ -117,14 +136,28 @@ python bench.py        --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.ex
 | v0.5.0 | API 冻结：语义化版本承诺、迁移指南 |
 | v1.0.0 | 产品：多后端抽象、性能回归门禁、外部用户 |
 
-开发模型（为什么用门禁式增量，而不是纯瀑布）见 [`docs/design/development-model.md`](docs/design/development-model.md)。
+开发模型（为什么用门禁式增量 V 模型，而不是纯瀑布）、命名考究、参考对象分层、
+项目→产品四阶段演进，都在 [`docs/engineering/PROCESS.md`](docs/engineering/PROCESS.md)。
+
+**「这个库要干什么、怎么验证它做对了」** 看
+[`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md) —— 五关验收手册。
 
 ---
 
 ## 参考
 
-设计参考 LevelDB / mini-lsm，工程实践对标 Pebble。关键决策记录在 [`docs/adr/`](docs/adr/)。
+| 用途 | 项目 |
+|---|---|
+| 主模板（通读） | [mini-lsm](https://github.com/skyzh/mini-lsm) |
+| 查代码细节 | [goleveldb](https://github.com/syndtr/goleveldb) |
+| 对标工程质量（只抄测试） | [Pebble](https://github.com/cockroachdb/pebble) |
+| 查文件格式 | [LevelDB](https://github.com/google/leveldb) |
+| 反面教材（三个真实 bug） | [Badger](https://github.com/dgraph-io/badger) |
+| 同类竞品 | [moonkv](https://mooncakes.io/docs/wallll-wal6/moonkv) · [moonjournalkit](https://mooncakes.io/docs/Sxy11112/moonjournalkit) |
+
+关键决策记录在 [`docs/adr/`](docs/adr/)，每层参考怎么用见
+[`docs/engineering/PROCESS.md`](docs/engineering/PROCESS.md) §2。
 
 ## License
 
-Apache-2.0
+MIT —— 见 [LICENSE](LICENSE)。

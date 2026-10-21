@@ -11,7 +11,7 @@
 ///
 /// 协议见 benches/python/README.md。
 ///
-/// 本文件只依赖 moonbitlang/core/json 与 chendev/moonlsm。
+/// 本文件只依赖 moonbitlang/core/json 与 PingGuoMiaoMiao/moonlsm。
 extern "C" fn c_getchar() -> Int = "getchar"
 
 ///|

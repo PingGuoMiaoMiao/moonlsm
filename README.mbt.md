@@ -1,4 +1,4 @@
-# chendev/moonlsm
+# PingGuoMiaoMiao/moonlsm
 
 **MoonBit 生态里的嵌入式 LSM 存储引擎。**
 
@@ -34,8 +34,8 @@ db.close()!
 
 设计文档、能力矩阵、崩溃测试方案、路线图都在 GitHub 仓库：
 
-**https://github.com/chendev/moonlsm**
+**https://github.com/PingGuoMiaoMiao/moonlsm**
 
 ## License
 
-Apache-2.0
+MIT

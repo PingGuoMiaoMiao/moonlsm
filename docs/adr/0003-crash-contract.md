@@ -2,7 +2,7 @@
 
 - **状态**：已接受（Accepted）
 - **日期**：2026-10-21
-- **决策者**：chendev
+- **决策者**：PingGuoMiaoMiao
 - **影响范围**：`wal.mbt`、`db.mbt`、`cmd/dbcli`、全部崩溃测试
 
 ---

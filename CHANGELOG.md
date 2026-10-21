@@ -63,6 +63,7 @@
 - `docs/adr/0002-wal-format.md`：WAL 一条记录一帧；MANIFEST 用全量快照
 - `docs/adr/0003-crash-contract.md`：崩溃一致性契约 C1–C5 与测试分层 L1–L4
 - `docs/engineering/PROCESS.md`：命名考究、参考对象分层、GIV 开发模型、设计模型与 8 张流程图、项目→产品四阶段演进
+- `docs/engineering/ACCEPTANCE.md`：验收手册 —— 这个库要干什么、四类契约、五关验收、8 个参考库位置、发布前清单
 - `benches/python/REFERENCES.md`：LevelDB / Pebble / Badger / mini-lsm 等跨语言实现调研
 - `PLAN.md`：模块拆分、三周排期、风险止损
 
@@ -92,6 +93,11 @@
   完整覆盖需 L3（WAL 尾部截断注入）与 L4（VM 断电），见 ADR-0003
 - **单线程**：无并发读写，无 group commit
 - **仅小端平台**：`open()` 会检测端序，非小端直接拒绝
+
+### 许可证
+
+MIT。已发布的 0.1.0 对获取者永久有效；若将来因企业用户需求改用带专利条款的许可证，
+只会影响之后发布的版本，不会回溯。详见 `docs/engineering/PROCESS.md` §1.4。
 
 ---
 

@@ -31,7 +31,7 @@ Python 只用于 `benches/python/` 下的测试脚本，不参与构建。运行
 ### 首次配置
 
 ```bash
-git clone https://github.com/chendev/moonlsm
+git clone https://github.com/PingGuoMiaoMiao/moonlsm
 cd moonlsm
 
 # 启用仓库自带的 git hook（会做 moon fmt 检查）

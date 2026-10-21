@@ -4,15 +4,15 @@
 // To add a dependency, run this command in your terminal:
 //   moon add moonbitlang/x
 
-name = "chendev/moonlsm"
+name = "PingGuoMiaoMiao/moonlsm"
 
 version = "0.1.0"
 
 readme = "README.mbt.md"
 
-repository = "https://github.com/chendev/moonlsm"
+repository = "https://github.com/PingGuoMiaoMiao/moonlsm"
 
-license = "Apache-2.0"
+license = "MIT"
 
 keywords = [ "lsm", "storage", "database", "embedded", "wal", "key-value" ]
 
