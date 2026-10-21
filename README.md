@@ -22,19 +22,41 @@ moonlsm 要做的，就是把这个空白补上——而且**把崩溃一致性�
 
 ## 设计
 
-```
-put(k, v)
-   ├─→ WAL（顺序追加，崩溃后重放）
-   └─→ MemTable（内存有序表）
-          └─ flush ─→ L0 SSTable
-                        └─ compaction ─→ L1 → L2 ...
+```mermaid
+flowchart TB
+    P["put(k, v)"] -->|"先落盘"| WAL["WAL<br/>wal/N.wal<br/>顺序追加 + fsync"]
+    WAL -->|"fsync 成功后才回 ack"| MEM["MemTable<br/>内存有序数组"]
+    MEM -->|"满 8 MiB 自动 flush"| L0["L0 SST<br/>可重叠"]
+    L0 -->|"L0 文件数 ≥ 4"| L1["L1 SST<br/>不重叠 · 二分定位"]
+    L1 -->|"L1 字节数 ≥ 1 MiB"| L2["L2 SST<br/>不重叠 · 最底层<br/>墓碑只在这里丢弃"]
+
+    MAN["MANIFEST-N + CURRENT<br/>版本快照：每层有哪些文件<br/>切换靠 rename 原子性"]
+    MAN -.->|"记录"| L0
+    MAN -.->|"记录"| L1
+    MAN -.->|"记录"| L2
+
+    subgraph RD["读：从新到旧，命中即停（不比较 seq）"]
+        direction TB
+        G["get / scan"] --> GM["MemTable"] --> GL0["L0"] --> GL1["L1"] --> GL2["L2"]
+    end
 ```
 
-- **写**：先写 WAL，再进 MemTable。MemTable 满了整块刷成 L0 SSTable。
-- **读**：MemTable → L0 → L1 → L2，每层先查 Bloom filter 跳过无关文件。
-- **合并**：后台 compaction 逐层合并，丢弃被覆盖的旧值和已过期的墓碑。
+三条路径各自的要点：
 
-详细字节布局见 [`docs/design/format.md`](docs/design/format.md)。
+| 路径 | 关键性质 |
+|---|---|
+| 写 | **fsync 在返回 ack 之前**，且 fsync 在改 MemTable 之前 —— 失败时写入完全不可见，不会出现「读得到、断电就没」的脏读 |
+| 读 | 从新到旧短路：命中第一个就返回，**不比较 seq**。所以内存里的文件顺序必须严格「新在前」，由 `version` 唯一决定 |
+| 归并 | 同一 key 取 **`seq` 最大**的那条（不是按文件顺序）。墓碑只在写进最底层时丢弃 —— 上层还有更旧版本时丢了会让数据复活 |
+
+**为什么是三层而不是两层**：只有 `L0 + L1` 时，「目标层是不是最底层」恒为真，
+这个判定永远不会被证伪 —— 而它判错的后果是「删掉的数据复活」。
+加了 L2 之后，两条分支都能在测试里真实走到。详见
+[ADR-0007](docs/adr/0007-compaction-levels-and-tombstones.md)。
+
+字节布局（WAL 帧 / data block / footer / MANIFEST）见
+[`docs/design/format.md`](docs/design/format.md)；
+崩溃点的恢复路径见各文件头的注释与 [ADR-0003](docs/adr/0003-crash-contract.md)。
 
 ---
 
