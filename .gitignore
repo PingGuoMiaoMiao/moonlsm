@@ -15,6 +15,12 @@ benches/python/_t/
 # dbcli 在没设 MOONLSM_DATA 时的默认数据目录
 .moonlsm_data/
 
+# 在仓库根目录跑 crash_test / 手工验证时产生的数据目录。
+# 之前漏了这几条，`git add -A` 把 .tmp_acc/ 之类的目录连带提交了进去。
+/data/
+data_sqlite/
+.tmp*/
+
 # 单元测试里的真文件系统用例（storage_wbtest / fs_native_wbtest）
 .moonlsm_test/
 
