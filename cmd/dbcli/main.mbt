@@ -5,17 +5,18 @@
 /// 之所以要独立进程而不是直接链库：kill -9 必须能杀掉一个独立进程，
 /// 同进程内没法测崩溃。
 ///
-/// 当前是**占位实现**：用内存 Map 代替真正的 Db，
-/// 目的是先把协议打通，让 model_check 能跑起来。
-/// 等 db.mbt 完成后，把 store 换成 @moonlsm.Db 即可。
+/// 当前接的是真正的 `@moonlsm.Db`（memtable + SST + 归并），
+/// 但**还没有 WAL**：进程退出数据就没了。崩溃一致性测试（crash_test.py）
+/// 要等 Week 2 的 WAL 落地才有意义，`probe_persistence.py` 会探测这一点
+/// 并让 CI 显式跳过，而不是假装通过。
 ///
 /// 协议见 benches/python/README.md。
 ///
 /// 本文件只依赖 moonbitlang/core/json、moonbitlang/core/encoding/utf8
 /// 与 PingGuoMiaoMiao/moonlsm。
 ///
-/// 用 Int 而不是 Int：`moon fmt` 在 0.1.20261016 起会把 `Int` 规范化成
-/// `Int`。写 `Int` 时新旧两版 formatter 都不改动，是个稳定的不动点。
+/// 全程用 `Int` 而不是 `Int32`：本项目验证的工具链 0.1.20260827 里
+/// 根本没有 `Int32` 这个类型（它是新版才引入的）。
 extern "C" fn c_getchar() -> Int = "getchar"
 
 ///|
@@ -137,7 +138,7 @@ fn ok_unit() -> String {
 }
 
 ///|
-fn ok_seq(seq : Int) -> String {
+fn ok_seq(seq : UInt64) -> String {
   "{\"ok\":true,\"seq\":" + seq.to_string() + "}"
 }
 
@@ -150,46 +151,47 @@ fn ok_value(v : String?) -> String {
 }
 
 ///|
+/// 引擎返回的是 `Bytes?`，转成 JSON 前必须 UTF-8 解码。
+/// 用 lossy 而不是严格解码：CLI 不该因为一个坏字节就崩掉整个进程。
+fn ok_bytes(v : Bytes?) -> String {
+  match v {
+    Some(b) => ok_value(Some(@utf8.decode_lossy(b)))
+    None => ok_value(None)
+  }
+}
+
+///|
 fn err(msg : String) -> String {
   "{\"ok\":false,\"err\":\"" + esc(msg) + "\"}"
 }
 
 ///|
+/// CLI 状态就是引擎本身。这里刻意不留任何额外缓存 ——
+/// 一旦 CLI 自己缓存了数据，测出来的就不是引擎的行为了。
 struct Cli {
-  store : Map[String, String]
-  mut seq : Int
+  db : @moonlsm.Db
 }
 
 ///|
 fn Cli::new() -> Cli {
-  { store: Map([]), seq: 0, }
+  // 8 MiB 的 memtable 阈值：跑测试脚本时基本不会触发 flush，
+  // 但 `flush` 命令可以手动触发，所以两条路径都测得到
+  { db: @moonlsm.Db::new(8 * 1024 * 1024), }
 }
 
 ///|
-fn Cli::bump(self : Cli) -> Int {
-  self.seq = self.seq + 1
-  self.seq
-}
-
-///|
-fn Cli::handle(self : Cli, req : Json) -> String {
+/// 处理一条请求。引擎错误（Io / Corruption / Closed）会向上抛，
+/// 由 `dispatch` 统一转成 `{"ok":false,...}`，而不是在这里静默吞掉。
+fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
   let op = fstr(req, "op")
   match op {
     "put" => {
-      let k = fstr(req, "k")
-      let v = fstr(req, "v")
-      self.store.set(k, v)
-      ok_seq(self.bump())
+      let k = @utf8.encode(fstr(req, "k"))
+      let v = @utf8.encode(fstr(req, "v"))
+      ok_seq(self.db.put(k, v))
     }
-    "get" => {
-      let k = fstr(req, "k")
-      ok_value(self.store.get(k))
-    }
-    "del" => {
-      let k = fstr(req, "k")
-      self.store.remove(k)
-      ok_seq(self.bump())
-    }
+    "get" => ok_bytes(self.db.get(@utf8.encode(fstr(req, "k"))))
+    "del" => ok_seq(self.db.delete(@utf8.encode(fstr(req, "k"))))
     "putmany" => {
       match jget(req, "items") {
         Some(items_json) =>
@@ -207,7 +209,7 @@ fn Cli::handle(self : Cli, req : Json) -> String {
                         Some(s) => s
                         None => ""
                       }
-                      self.store.set(k, v)
+                      ignore(self.db.put(@utf8.encode(k), @utf8.encode(v)))
                     }
                   None => ()
                 }
@@ -216,21 +218,13 @@ fn Cli::handle(self : Cli, req : Json) -> String {
           }
         None => ()
       }
-      ok_seq(self.bump())
+      // 一批写入只回一个 seq，取最后一个（也是最大的）
+      ok_seq(self.db.last_seq())
     }
     "scan" => {
-      let start = fstr(req, "start")
-      let end = fstr(req, "end")
-      let keys : Array[String] = []
-      for k, _ in self.store {
-        // 必须用字节序比较：String::compare 按长度优先，
-        // 直接拿它做范围判断会把 "k00001" 这类长 key 漏掉。
-        if @moonlsm.compare_strings(k, start) >= 0 &&
-          @moonlsm.compare_strings(k, end) < 0 {
-          keys.push(k)
-        }
-      }
-      keys.sort_by(fn(a, b) { @moonlsm.compare_strings(a, b) })
+      // 左闭右开，与 model_check.py 的 `start <= x < end` 一致
+      let start = @utf8.encode(fstr(req, "start"))
+      let end = @utf8.encode(fstr(req, "end"))
       let limit = match jget(req, "limit") {
         Some(v) =>
           match as_num(v) {
@@ -239,31 +233,57 @@ fn Cli::handle(self : Cli, req : Json) -> String {
           }
         None => 100
       }
+      let items = self.db.scan(start, end, limit)
       let mut body = ""
-      let mut i = 0
-      for k in keys {
-        if i >= limit {
-          break
-        }
-        if i > 0 {
+      let mut first = true
+      for p in items {
+        if !first {
           body = body + ","
         }
-        let v = match self.store.get(k) {
-          Some(x) => x
-          None => ""
-        }
-        body = body + "[\"" + esc(k) + "\",\"" + esc(v) + "\"]"
-        i = i + 1
+        first = false
+        body = body +
+          "[\"" +
+          esc(@utf8.decode_lossy(p.key)) +
+          "\",\"" +
+          esc(@utf8.decode_lossy(p.value)) +
+          "\"]"
       }
       "{\"ok\":true,\"items\":[" + body + "]}"
     }
-    "flush" => ok_unit()
-    "stats" =>
+    "flush" => {
+      self.db.flush()
+      ok_unit()
+    }
+    "stats" => {
+      // live_keys 需要真扫一遍：memtable 里的墓碑和 SST 里的旧值
+      // 都不能计入。这比「memtable 条目数」慢，但它是唯一正确的口径。
+      let live = self.db.scan(
+        @utf8.encode(""),
+        @utf8.encode("\u{10FFFF}"),
+        100000000,
+      )
       "{\"ok\":true,\"live_keys\":" +
-      self.store.length().to_string() +
-      ",\"wal_bytes\":0}"
+      live.length().to_string() +
+      ",\"wal_bytes\":0,\"ssts\":" +
+      self.db.sst_count().to_string() +
+      ",\"flushes\":" +
+      self.db.flush_count().to_string() +
+      ",\"mem_entries\":" +
+      self.db.mem_entry_count().to_string() +
+      "}"
+    }
     "close" => ok_unit()
     _ => err("unknown op: " + op)
+  }
+}
+
+///|
+/// 一条输入行 → 一行输出。把「JSON 解析失败」和「引擎报错」分开报，
+/// 否则引擎的 Corruption 会被误报成 bad json，排查时白走一大圈。
+fn dispatch(cli : Cli, line : String) -> String {
+  let req = @json.parse(line) catch { _ => return err("bad json") }
+  cli.handle(req) catch {
+    _ => err("engine error")
   }
 }
 
@@ -277,8 +297,7 @@ fn main {
         if line.length() == 0 {
           continue
         }
-        let resp = cli.handle(@json.parse(line)) catch { _ => err("bad json") }
-        println(resp)
+        println(dispatch(cli, line))
         ignore(c_fflush(0))
       }
     }

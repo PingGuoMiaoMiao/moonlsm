@@ -45,6 +45,22 @@
   - 二分逻辑抽成 `restart_index_for`，`get` 与 `seek` 共用。
     写两份的话，某天只改其中一份就会得到「精确查找对、下界查找错」
 
+**读写路径（Week 1 D6+D7）**
+
+- `iter.mbt`：k 路归并迭代器
+  - 同 key 取 `seq` 最大的一条（**不按来源顺序**，否则 compaction 之后会读错）
+  - 墓碑参与归并但由上层过滤 —— 直接丢弃墓碑会让底层旧值「复活」
+  - 输出严格按 key 升序
+- `db.mbt`：`Db` = memtable + 若干 SST，读路径 `memtable → ssts[0] → …`
+  - `put` / `delete` / `get` / `scan`（左闭右开）/ `flush`
+  - `flush` 的顺序是「写 SST → **立刻读回校验** → 才清空 memtable」，
+    中间失败绝不清 memtable
+  - memtable 超过阈值自动 flush
+- `cmd/dbcli`：从内存 Map 占位换成真正的 `@moonlsm.Db`
+  - `stats` 增加 `ssts` / `flushes` / `mem_entries`；`live_keys` 改为真扫一遍
+    （memtable 的墓碑和 SST 的旧值都不能计入）
+  - JSON 解析失败与引擎报错分开报，否则 Corruption 会被误报成 bad json
+
 **测试**
 
 - `varint_wbtest.mbt`：7 条，含**逐字节黄金向量**（不只是往返）
@@ -52,12 +68,19 @@
   restart 结构、二分查找边界、墓碑语义、乱序拒绝、结构损坏
 - `sstable_wbtest.mbt`：10 条，含 1 万条写回、跨 block、64 KiB 大 value、
   bloom 无假阴性、坏文件不 panic、footer 区域首尾相接
+- `iter_wbtest.mbt`：7 条，含随机多来源与参考实现对拍
+- `db_wbtest.mbt`：9 条，含 2000 步随机操作与 `Map` 参考模型对拍
+  （mem_limit 设成 300 字节，确保真的发生几十次 flush）
 
 实测（1 万条 `key:%06d -> value:<i>`）：SST 187 KB / 44 个 data block /
 filter 12.5 KB / index 613 B / 平均每条 19 字节。
+`model_check.py` 2000 步 × seed 1/7/11 全部零错误。
 
 ### 变更
 
+- `model_check.py` 现在会先探测引擎是否支持持久化，不支持时**自动关闭重启测试**
+  并打印说明。默认 `--restart-every 1000` 在没有 WAL 的阶段必然产生几百条假 FAIL，
+  把真正的正确性错误淹掉。Week 2 加上 WAL 后，重启测试会自动恢复，不需要改脚本
 - **磁盘格式修订（v1 发布前）**：data block 的 entry 增加 `seq`（`varint64`）。
   初版规范只在 footer 放 `smallest_seq`，实现 compaction 时会立刻崩塌 ——
   归并多个 SST 时无法判断同一 key 哪条更新（文件编号只在 L0 能当序用），
@@ -74,15 +97,22 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
   `prev_key[:shared]`：`aab` 被解成 `aaab`，且 `get` 全部落空。
   被 1000 条往返测试抓到
 
-### 计划中（v0.2.0 · Week 1 剩余）
+### 计划中（v0.2.0 · Week 2）
 
-- `iter.mbt`：memtable + 单 SST 的归并迭代
-- `db.mbt`：串起 put / get / delete / scan 的最简路径（无 WAL、无 compaction）
+- `wal.mbt`：§2 的帧格式 + CRC32C + 恢复时截断尾部坏帧
+- `manifest.mbt`：§4 的全量快照 + CURRENT 原子 rename
+- `fs.mbt`：边界层的文件读写与 fsync（核心仍只处理 Bytes）
+- `compact.mbt`：L0 → L1 的归并 compaction，输出后清理输入
+- `db.mbt` 接入 `open(path)` / `close()`，进程重启不丢数据
 
 ### 已知技术债
 
 - `SstWriter` 把所有 key 留在内存里建 bloom（需要预先知道元素个数）。
   1 万条约 100 KB，可以接受；到百万级要改成两遍写或可增长的 bloom
+- `Db::scan` 与 `SstReader::entries` 会一次性解出所有 SST 的全部条目。
+  小规模正确且简单，但读放大会随 SST 变大线性增长。
+  改成惰性的 block 级迭代器是 v1.1 的事（接口不变）
+- 没有 compaction，SST 数量只增不减，读路径的 SST 扫描是 O(文件数)
 
 ---
 

@@ -81,6 +81,23 @@ def gen_value(rng, key, big=False):
     return key + "|" + ("v" * rng.randint(0, 300))
 
 
+def _supports_persistence(cmd_str, data_dir):
+    """复用 probe_persistence.py 的判断：exit 0 = 已支持持久化。"""
+    probe = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "probe_persistence.py")
+    if not os.path.exists(probe):
+        return False
+    try:
+        r = subprocess.run(
+            [sys.executable, probe, "--cmd", cmd_str,
+             "--data-dir", os.path.join(os.path.abspath(data_dir), "_probe")],
+            capture_output=True, text=True, timeout=180,
+        )
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cmd", required=True)
@@ -89,6 +106,14 @@ def main():
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--data-dir", default="./data")
     args = ap.parse_args()
+
+    # 引擎是否已支持持久化？M1 阶段没有 WAL，重启必然丢数据。
+    # 直接跑重启会得到几百条 FAIL，把真正的正确性错误淹掉 ——
+    # 让测试自己适应阶段，比让人记住「这个阶段要加 --restart-every 0」可靠。
+    if args.restart_every and not _supports_persistence(args.cmd, args.data_dir):
+        print("注意: 引擎尚未支持持久化（无 WAL），已自动关闭重启测试。")
+        print("      这不是失败。Week 2 加上 WAL 后，重启测试会自动恢复。")
+        args.restart_every = 0
 
     seed = args.seed if args.seed is not None else int(time_seed())
     rng = random.Random(seed)

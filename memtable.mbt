@@ -135,3 +135,11 @@ pub fn MemTable::is_full(self : MemTable) -> Bool {
 pub fn MemTable::to_entries(self : MemTable) -> Array[Entry] {
   self.entries
 }
+
+///|
+/// 清空。**只在 flush 成功后调用** ——
+/// 先落盘、再清空，顺序反了就是丢数据。
+pub fn MemTable::clear(self : MemTable) -> Unit {
+  self.entries.clear()
+  self.bytes = 0
+}

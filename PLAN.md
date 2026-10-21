@@ -193,8 +193,8 @@ pub fn fsync(self : Db) -> Unit raise LsmError
 | D3 | `sstable.mbt`：写 SST（data block + index block + footer） | 写 1 万条后能读回 | ✅ 完成（含 filter block） |
 | D4 | `sstable.mbt`：读 SST + 二分查 index | 随机读 1000 次全对 | ✅ 完成（与 D3 一并交付） |
 | D5 | `bloom.mbt` 接入 SST，写时生成、读时先查 | 不存在的 key 能跳过文件 | ✅ 完成 |
-| D6 | `iter.mbt`：memtable + 单 SST 的归并 | 同 key 多版本只返回最新 | ⬜ |
-| D7 | `db.mbt` 串起来（无 WAL、无 compaction） | `model_check.py` 能跑到 500 步不报错 | ⬜ |
+| D6 | `iter.mbt`：memtable + 单 SST 的归并 | 同 key 多版本只返回最新 | ✅ 完成（含差分测试） |
+| D7 | `db.mbt` 串起来（无 WAL、无 compaction） | `model_check.py` 能跑到 500 步不报错 | ✅ 完成（2000 步 × 3 seed 零错误） |
 
 D2 的实际交付比原计划多一个文件：`varint.mbt`。原因是 varint 是 WAL / block /
 MANIFEST 三处格式的共用底座，混在 `block.mbt` 里会让「WAL 编码错」和
@@ -204,6 +204,11 @@ MANIFEST 三处格式的共用底座，混在 `block.mbt` 里会让「WAL 编码
 D3 与 D4 合并交付：写与读的接口一旦确定，分两次提交反而会让「写完不能读」
 这个中间状态停留更久。`SstReader` 的 `get` / `entries` 与 `SstWriter` 同一次提交，
 测试也是同一次跑通的。
+
+**Week 1 实际收尾状态**：`put / get / delete / scan / flush` 全部打通，
+`moon test` 61 条全绿，`model_check.py` 2000 步 × 3 个 seed 零错误，
+CLI 手工驱动验证过「flush → 删除 → 再 flush → 读不到」这条跨 SST 的墓碑路径。
+缺口只有一个但很关键：**没有 WAL，进程退出数据就丢**。这正是 Week 2 第一件事。
 
 **Week 1 结束时的状态**：数据只在内存和一个 SST 里，重启就丢。这是正常的。
 

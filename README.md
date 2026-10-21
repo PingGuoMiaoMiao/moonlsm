@@ -62,20 +62,26 @@ printf '%s\n' \
 {"ok":true,"items":[["user:1","alice"]]}
 ```
 
-> 当前 dbcli 是内存占位实现，重启后数据会丢。完整的验收步骤见
-> [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md)。
+> **当前进度：Week 1 完成。** 写 → memtable → 刷 SST → 归并读回这条路径已打通，
+> `model_check.py` 2000 步对拍零错误。但**还没有 WAL**，进程退出数据就丢；
+> 也还没有 compaction，SST 数量只增不减。Week 2 补这两块。
+> 完整的验收步骤见 [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md)。
 
 ---
 
 ## API（设计稿，尚未全部实现）
 
 ```moonbit
-let db = @moonlsm.open("data")!
-db.put(b"key", b"value")!
-let v = db.get(b"key")!          // Bytes?
+// 已经能用的（内存实例，无持久化）
+let db = @moonlsm.Db::new(8 * 1024 * 1024)   // memtable 阈值
+db.put(b"key", b"value")!                     // -> UInt64 (seq)
+let v = db.get(b"key")                        // -> Bytes?，删除也是 None
 db.delete(b"key")!
-let rows = db.scan(b"a", b"z", 100)!
-db.close()!
+let rows = db.scan(b"a", b"z", 100)!          // [start, end)
+db.flush()!                                   // memtable -> SST
+
+// 还没做的（需要文件 IO 层与 WAL）
+// @moonlsm.open("data")! / db.close()!
 ```
 
 ---
@@ -84,12 +90,14 @@ db.close()!
 
 | 能力 | 状态 |
 |---|---|
-| 点查 / 写入 / 删除 | 设计中 |
-| 范围扫描 | 设计中 |
-| WAL 崩溃恢复 | 设计中 |
-| 分层 compaction | 设计中 |
-| Bloom filter | ✅ 已实现 |
-| 内存有序表 | ✅ 已实现（有序数组，后续换跳表） |
+| 点查 / 写入 / 删除 | ✅ 已实现（内存 + SST） |
+| 范围扫描 | ✅ 已实现（左闭右开，多路归并） |
+| SSTable 读写（前缀压缩 + restart point） | ✅ 已实现 |
+| 索引 / Bloom filter / footer | ✅ 已实现 |
+| WAL 崩溃恢复 | 设计中（Week 2） |
+| 分层 compaction | 设计中（Week 2） |
+| 持久化（进程重启不丢） | 未实现 —— 这是当前最大的缺口 |
+| 内存有序表 | ✅ 已实现（有序数组，Week 3 视性能换跳表） |
 
 ### 明确不做
 
