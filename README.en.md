@@ -74,6 +74,7 @@ are documented in file headers and [ADR-0003](docs/adr/0003-crash-contract.md).
 moon check                        # type check (zero warnings)
 moon test                         # unit tests
 moon build --target native        # build dbcli
+moon run examples/basic           # run the minimal example
 ```
 
 See it work in ten seconds (JSON lines over stdin; data directory comes from
@@ -96,12 +97,14 @@ printf '%s\n' \
 Run `{"op":"get","k":"user:1"}` again in a fresh process — the data is still there.
 On disk you will see `CURRENT` / `MANIFEST-*` / `wal/<n>.wal` / `sst/<n>.sst`.
 
-> **Status: Week 2 complete.** WAL + MANIFEST + three-level compaction are all
-> wired up: writes land in the WAL before ack, `kill -9` loses no acknowledged
-> data (`crash_test.py --rounds 20` fully green), level membership is rebuilt from
-> the MANIFEST on restart, L0 merges itself once it holds 4 files, and L1 sinks to
-> L2 past 1 MiB. Full acceptance procedure:
-> [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md).
+> **Status: Week 3.** WAL + MANIFEST + three-level compaction are all wired up:
+> writes land in the WAL before ack, `kill -9` loses no acknowledged data
+> (`crash_test.py --rounds 20` fully green), level membership is rebuilt from the
+> MANIFEST on restart, L0 merges itself once it holds 4 files, and L1 sinks to
+> L2 past 1 MiB. `model_check.py` ran 5,000 random steps with zero errors.
+> Full acceptance procedure:
+> [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md); API contract:
+> [`docs/design/API.md`](docs/design/API.md).
 
 ---
 
@@ -229,8 +232,8 @@ locating each bottleneck, is in
 
 | Version | Goal |
 |---|---|
-| v0.1.0 | Competition release: crash 20/20, model_check 5,000 steps with 0 errors, published to mooncakes |
-| v0.2.0 | Embeddable: API freeze draft, runnable examples, all three backends build |
+| ✅ v0.1.0 | Competition release: crash 20/20, model_check 5,000 steps with 0 errors |
+| ✅ v0.2.0 | Embeddable: API freeze draft, runnable examples, all three backends build, published to mooncakes |
 | v0.3.0 | Observable: stats/metrics, reproducible benchmarks |
 | v0.5.0 | API frozen: semantic-versioning commitment, migration guide |
 | v1.0.0 | Product: multi-backend abstraction, performance regression gates, external users |

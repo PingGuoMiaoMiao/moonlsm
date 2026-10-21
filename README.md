@@ -68,6 +68,7 @@ flowchart TB
 moon check                        # 类型检查（零警告）
 moon test                         # 单元测试
 moon build --target native        # 构建 dbcli
+moon run examples/basic           # 跑最小示例（examples/basic/main.mbt）
 ```
 
 十秒看到它在工作（管道喂 JSON，数据目录由 `MOONLSM_DATA` 指定）：
@@ -89,10 +90,12 @@ printf '%s\n' \
 再跑一次 `{"op":"get","k":"user:1"}` —— 换成新进程，数据还在。
 磁盘上会看到 `CURRENT` / `MANIFEST-*` / `wal/<n>.wal` / `sst/<n>.sst`。
 
-> **当前进度：Week 2 完成。** WAL + MANIFEST + 三层 compaction 全部打通：
+> **当前进度：Week 3。** WAL + MANIFEST + 三层 compaction 全部打通：
 > 写入先落 WAL 再 ack，`kill -9` 不丢已确认数据（`crash_test.py --rounds 20` 全绿），
 > 重启后层信息从 MANIFEST 恢复，L0 攒够 4 个文件自动归并、L1 超过 1 MiB 自动下沉。
-> 完整的验收步骤见 [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md)。
+> `model_check.py` 5000 步随机对拍零错。
+> 完整的验收步骤见 [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md)，
+> API 契约见 [`docs/design/API.md`](docs/design/API.md)。
 
 ---
 
@@ -212,8 +215,8 @@ python bench.py        --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.
 
 | 版本 | 目标 |
 |---|---|
-| v0.1.0 | 比赛版：crash 20/20、model_check 5000 步 0 错、发布到 mooncakes |
-| v0.2.0 | 可嵌入：API 冻结草案、examples 可跑、三后端构建通过 |
+| ✅ v0.1.0 | 比赛版：crash 20/20、model_check 5000 步 0 错 |
+| ✅ v0.2.0 | 可嵌入：API 冻结草案、examples 可跑、三后端构建通过、发布到 mooncakes |
 | v0.3.0 | 可观测：stats/metrics、bench 可复现 |
 | v0.5.0 | API 冻结：语义化版本承诺、迁移指南 |
 | v1.0.0 | 产品：多后端抽象、性能回归门禁、外部用户 |
