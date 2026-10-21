@@ -13,9 +13,49 @@
 
 ## [Unreleased]
 
-### 计划中（v0.2.0 · Week 1）
+### 新增
 
+**磁盘格式底座（Week 1 D1）**
+
+- `varint.mbt`：LEB128 变长整数 + 小端定长整数的读写原语
+  - WAL / data block / MANIFEST 三处格式共用，所以单独成文件、单独测试：
+    varint 有错时三种格式会同时坏，且症状互相掩盖（表现为 CRC 校验失败）
+  - 所有 `read_*` 在越界或编码非法时返回 `None` 而不抛错 ——
+    同一个 `None` 在 WAL 恢复里是「尾部截断，可容忍」，
+    在 block 解析里是「数据损坏，必须报错」，这个判断不该由底层做
 - `block.mbt`：SST data block 的前缀压缩 + restart point 编解码
+  - `BlockBuilder`：按 key 严格升序追加，每 16 条一个 restart 点，
+    `finish()` 产出「entry 区 + restart 数组 + 计数」
+  - `Block`：restart 数组二分 + 局部线性扫描，最坏解 16 条 entry
+  - 结构损坏返回 `None` 而不是 panic；乱序/重复 key 直接抛 `Corruption`
+  - 前缀压缩实测：1000 条共享前缀的 11 字节 key，体积比同长度随机 key 小 15% 以上
+
+**测试**
+
+- `varint_wbtest.mbt`：7 条，含**逐字节黄金向量**（不只是往返）
+- `block_wbtest.mbt`：12 条，含完整 block 的黄金向量、1000 条随机 key 往返、
+  restart 结构、二分查找边界、墓碑语义、乱序拒绝、结构损坏
+
+### 变更
+
+- **磁盘格式修订（v1 发布前）**：data block 的 entry 增加 `seq`（`varint64`）。
+  初版规范只在 footer 放 `smallest_seq`，实现 compaction 时会立刻崩塌 ——
+  归并多个 SST 时无法判断同一 key 哪条更新（文件编号只在 L0 能当序用），
+  快照读也无法定位单个 key 的版本。详见 `docs/design/format.md` §3.2.1。
+  由于 v1 尚未发布（还没有 SST 写入器），不涉及格式迁移
+
+### 缺陷修复
+
+- `write_varint32` / `write_varint64` 编码时**漏置续位 `0x80`**：
+  128 被写成 `00 01`，解码端读到第一个没有续位的字节就停下，得到 0。
+  这是「只做往返测试」抓不到的错误类型 —— 往返能过是因为编码器和解码器错得一致；
+  被 `varint_wbtest.mbt` 的逐字节黄金向量抓到
+- `block` 解码重建 key 时误用 `prev_key[:]`（整个上一条 key）而不是
+  `prev_key[:shared]`：`aab` 被解成 `aaab`，且 `get` 全部落空。
+  被 1000 条往返测试抓到
+
+### 计划中（v0.2.0 · Week 1 剩余）
+
 - `sstable.mbt`：写 / 读 SST，含 index block 与 footer
 - `iter.mbt`：memtable + 单 SST 的归并迭代
 - `db.mbt`：串起 put / get / delete / scan 的最简路径（无 WAL、无 compaction）

@@ -99,11 +99,21 @@ jobs:
   # ---------------------------------------------------------------------------
   # 多后端构建
   #
+  # 这里刻意分两种 scope，不是偷懒：
+  #
+  # - **lib**：只构建库包（根包），在 wasm-gc / js 上跑。这证明核心数据结构
+  #   （memtable / block / varint / bloom）没有意外依赖 native 特性 ——
+  #   一旦有人在库里偷偷用 extern "C" 或文件系统 API，这个 job 会立刻红。
+  # - **all**：构建整个模块（库 + cmd/dbcli），只在 native 上跑。
+  #   dbcli 用 `extern "C"` 调 libc 的 getchar/fflush 读 stdin，
+  #   wasm-gc 与 js 后端不支持 extern "C"（编译期报 [4156]）。
+  #   CLI 本来就只在 native 上有意义，没必要为它做多后端适配。
+  #
   # native 只在 Linux / macOS 跑：Windows 上 native 后端需要 MSVC 工具链，
   # 配置成本高于收益，而 Windows 的 check + test 已经覆盖了语义层面。
   # ---------------------------------------------------------------------------
   build:
-    name: 构建 / ${{ matrix.target }} @ ${{ matrix.os }}
+    name: 构建 / ${{ matrix.target }} (${{ matrix.scope }}) @ ${{ matrix.os }}
     needs: fmt
     strategy:
       fail-fast: false
@@ -111,17 +121,28 @@ jobs:
         include:
           - os: ubuntu-latest
             target: wasm-gc
+            scope: lib
           - os: ubuntu-latest
             target: js
+            scope: lib
           - os: ubuntu-latest
             target: native
+            scope: all
           - os: macos-latest
             target: native
+            scope: all
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-moonbit
 
-      - name: moon build --target ${{ matrix.target }}
-        run: moon build --target ${{ matrix.target }}
+      - name: moon build --target ${{ matrix.target }}（scope=${{ matrix.scope }}）
+        shell: bash
+        run: |
+          if [ "${{ matrix.scope }}" = "lib" ]; then
+            # 末尾的 `.` 是包路径，只构建根包，不递归到 cmd/dbcli
+            moon build --target ${{ matrix.target }} .
+          else
+            moon build --target ${{ matrix.target }}
+          fi

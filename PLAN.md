@@ -186,15 +186,20 @@ pub fn fsync(self : Db) -> Unit raise LsmError
 
 对应 mini-lsm Week 1。**目标：`put/get/scan` 在内存 + 单个 SST 上正确工作，不要求崩溃恢复。**
 
-| 天 | 任务 | 验收 |
-|---|---|---|
-| D1 | `memtable.mbt`：有序表 + put/get/iter | `moon test` 覆盖写、墓碑用例通过 |
-| D2 | `block.mbt`：前缀压缩 + restart point 编解码 | 往返测试 1000 组随机 key 通过 |
-| D3 | `sstable.mbt`：写 SST（data block + index block + footer） | 写 1 万条后能读回 |
-| D4 | `sstable.mbt`：读 SST + 二分查 index | 随机读 1000 次全对 |
-| D5 | `bloom.mbt` 接入 SST，写时生成、读时先查 | 不存在的 key 能跳过文件 |
-| D6 | `iter.mbt`：memtable + 单 SST 的归并 | 同 key 多版本只返回最新 |
-| D7 | `db.mbt` 串起来（无 WAL、无 compaction） | `model_check.py` 能跑到 500 步不报错 |
+| 天 | 任务 | 验收 | 状态 |
+|---|---|---|---|
+| D1 | `memtable.mbt`：有序表 + put/get/iter | `moon test` 覆盖写、墓碑用例通过 | ✅ 完成 |
+| D2 | `varint.mbt` + `block.mbt`：前缀压缩 + restart point 编解码 | 往返测试 1000 组随机 key 通过 | ✅ 完成（含逐字节黄金向量） |
+| D3 | `sstable.mbt`：写 SST（data block + index block + footer） | 写 1 万条后能读回 | ⬜ |
+| D4 | `sstable.mbt`：读 SST + 二分查 index | 随机读 1000 次全对 | ⬜ |
+| D5 | `bloom.mbt` 接入 SST，写时生成、读时先查 | 不存在的 key 能跳过文件 | 🟡 过滤器本体已有，编码未写 |
+| D6 | `iter.mbt`：memtable + 单 SST 的归并 | 同 key 多版本只返回最新 | ⬜ |
+| D7 | `db.mbt` 串起来（无 WAL、无 compaction） | `model_check.py` 能跑到 500 步不报错 | ⬜ |
+
+D2 的实际交付比原计划多一个文件：`varint.mbt`。原因是 varint 是 WAL / block /
+MANIFEST 三处格式的共用底座，混在 `block.mbt` 里会让「WAL 编码错」和
+「block 编码错」这两类问题纠缠在一起。单独成文件后，D3 写 SST 和 Week 2 写 WAL
+都直接复用它。
 
 **Week 1 结束时的状态**：数据只在内存和一个 SST 里，重启就丢。这是正常的。
 

@@ -129,7 +129,7 @@ WAL 里可能有已经被 flush 进 SST 的记录。恢复时用 `MANIFEST.last_
 采用 **前缀压缩 + restart point**（与 LevelDB 同构，便于对照调试）。
 
 ```
-entry_0:  type(1B) shared(varint32) non_shared(varint32) value_len(varint32) key_delta[non_shared] value[value_len]
+entry_0:  type(1B) seq(varint64) shared(varint32) non_shared(varint32) value_len(varint32) key_delta[non_shared] value[value_len]
 entry_1:  ...
 ...
 +-----------------------------------+
@@ -142,8 +142,9 @@ entry_1:  ...
 ```
 
 - `type`：`0x00` = 正常值，`0x01` = **墓碑**（该 key 已删除）。
-  - **不能用 `value_len == 0` 表示删除。** 那样无法区分「写入空字符串」和「删除这个 key」，会导致两种数据错误：一是删除被当成写入空值（删除失效），二是空值被当成删除（数据凭空消失）。这是 LSM 实现里最常见的静默 bug 之一，有专门的回归测试（`lsm_wbtest.mbt` 的「墓碑与空 value 必须可区分」）。
+  - **不能用 `value_len == 0` 表示删除。** 那样无法区分「写入空字符串」和「删除这个 key」，会导致两种数据错误：一是删除被当成写入空值（删除失效），二是空值被当成删除（数据凭空消失）。这是 LSM 实现里最常见的静默 bug 之一，有专门的回归测试（`memtable_wbtest.mbt` 与 `block_wbtest.mbt` 各一条「墓碑与空 value 必须可区分」）。
   - 1 字节的开销在 4 KiB block 里可以忽略，换取的是语义无歧义。
+- `seq`：这条记录的写入序号，`varint64`。**v1 修订时新增，见 §3.2.1。**
 - `shared`：与**上一个 key** 的公共前缀长度。restart 点的 `shared` 恒为 0。
 - `non_shared`：本条 key 去掉前缀后的长度。
 - restart 间隔：**16 条**一条 restart point。
@@ -151,6 +152,19 @@ entry_1:  ...
 - block 内部 key 严格升序，**不允许重复 key**（同一 key 的多版本在 compaction 阶段已被折叠）。
 
 查找算法：对 restart 数组二分 → 从该 restart 点线性扫描到下一个 restart 点。最坏 16 次 entry 解码。
+
+### 3.2.1 为什么 entry 里必须带 `seq`（v1 修订）
+
+初版规范只把 `seq` 放在 WAL payload 和 footer 的 `smallest_seq` 里，data block 的 entry 不带 `seq`。这个设计**在实现 compaction 时会立刻崩塌**，原因有两条：
+
+1. **compaction 归并时必须知道谁更新。** 归并 N 个输入 SST 时，同一个 key 会出现多次。要挑出最新的一条，就必须逐条比较 `seq`。仅靠「文件编号大的更新」只在 L0 成立；一旦 compaction 输出到 L1、L1 内部有多个重叠文件，文件编号与 seq 顺序就没有保证关系了。
+2. **快照读需要它。** 没有 `seq`，就没法回答「这个 key 在 seq=1000 时是什么值」。footer 里一个 `smallest_seq` 只能表达整个文件的下界，表达不了「文件内部每条各自的序号」。
+
+**代价**：每条 entry 多 1–3 字节（`seq < 2^14` 时 2 字节）。一条 entry 通常 30–50 字节，开销约 5%。
+
+**为什么存绝对值而不是相对 `smallest_seq` 的差值**：block 是按 key 升序追加的，`seq` 在 block 内**不单调**（先写 z 再写 a，block 里 a 在前但 seq 更大）。差值编码要求基准值在追加前就已知，而 `smallest_seq` 要等 block 关掉才能确定 —— 中间可能出现负差值。绝对值没有这个耦合，且 varint 本身已经把常见的小 seq 压到 2 字节，差值省不了多少。**宁可多 1 字节，也不要引入「基准值必须在写入前确定」这条隐含约束。**
+
+> 这次修订正是 G2 门禁（格式冻结）存在的意义：问题在写第一行 block 代码时就被发现，返工成本是一段文档 + 一个字段；如果等 compaction 写完再发现，要重写编码器、解码器、所有往返测试和已经产生的测试数据文件。
 
 ### 3.3 filter block（Bloom）
 
@@ -286,16 +300,27 @@ SST 元信息本身很小（1 万个 SST 也才 400 KB），而 compaction 触�
 
 ## 6. 待实现清单（v1 范围）
 
-| 格式 | 状态 |
-|---|---|
-| WAL 帧 + 恢复截断 | ⬜ 未实现 |
-| data block 前缀压缩 | ⬜ 未实现 |
-| index block | ⬜ 未实现 |
-| filter block（bloom 已有，编码未写） | 🟡 部分 |
-| footer | ⬜ 未实现 |
-| MANIFEST + CURRENT 原子切换 | ⬜ 未实现 |
+| 格式 | 状态 | 实现位置 |
+|---|---|---|
+| WAL 帧 + 恢复截断 | ⬜ 未实现 | — |
+| data block 前缀压缩 | ✅ 完成 | `block.mbt` |
+| index block | ⬜ 未实现 | — |
+| filter block（bloom 已有，编码未写） | 🟡 部分 | `bloom.mbt` |
+| footer | ⬜ 未实现 | — |
+| MANIFEST + CURRENT 原子切换 | ⬜ 未实现 | — |
 
 图例：✅ 完成 / 🟡 部分 / ⬜ 未实现
+
+`data block` 的完成标准（不只是「能编能解」）：
+
+- [x] 编码字节与本文档 §3.2 逐字节一致（`block_wbtest.mbt` 的「黄金向量」测试）
+- [x] 1000 条递增 key 往返逐条一致
+- [x] restart 间隔为 16，restart 数组位置与计数正确
+- [x] 前缀压缩确实生效（同长度随机 key 对比，体积至少小 15%）
+- [x] `get` 二分查找命中全部 key，越界/不存在返回 `None`
+- [x] 墓碑与空 value 可区分
+- [x] 乱序/重复 key 直接报错，不写出坏 block
+- [x] 结构损坏返回 `None`，不 panic
 
 ---
 
