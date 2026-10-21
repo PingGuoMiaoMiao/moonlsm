@@ -199,3 +199,65 @@ test "sst: 索引 seek 语义是「第一个 last_key >= 目标」" {
   // 比所有 key 都大 → 没有条目满足 >=
   assert_true(r.index.seek(@utf8.encode("zzz")) is None)
 }
+
+///|
+/// `scan_range` 与「`entries()` 之后再按区间筛」必须逐条一致。
+///
+/// 这是块级剪枝的守门人：剪枝的边界很容易写错一位 ——
+/// 「第一个 last_key >= start 的块」写成 `>`、或者「last_key >= end 就停」
+/// 写成 `>`，症状都是**悄悄少返回几条**，而调用方往往只看总数。
+///
+/// 所以这里不挑几个好看的区间，而是把 start / end 都扫过整个 key 空间，
+/// 包括「落在块中间」「正好等于某个 key」「完全越界」「区间为空」四类。
+test "sst: scan_range 与全量筛选逐条一致（含块边界）" {
+  // 3000 条、每条约 25 字节 ≈ 75 KiB，按 4 KiB 一块会切出十几个块。
+  // 只有几百条的话全落在一两个块里，块级剪枝根本不会被触发。
+  let n = 3000
+  let raw = build_sst(n)
+  let r = must_open(raw)
+  let all = r.entries()
+  assert_eq(all.length(), n)
+  // 确认真的跨了很多块，否则这条测试退化成「单块内筛选」
+  assert_true(r.block_count() > 10)
+  let keys : Array[String] = []
+  for i in 0..<n {
+    keys.push("key:" + pad6(i))
+  }
+  // 参照实现：直接筛
+  let cases : Array[(String, String)] = [
+    ("", "zzzzzz"),                       // 全量
+    ("key:000000", "key:" + pad6(n)),     // 正好覆盖全部
+    ("key:000010", "key:000020"),         // 块中间开始、块中间结束
+    ("key:000015", "key:000016"),         // 只有一条
+    ("key:000015", "key:000015"),         // 空区间（左闭右开）
+    ("key:" + pad6(n - 1), "key:999999"), // 最后一条
+    ("key:" + pad6(n), "key:999999"),     // 完全越界（右）
+    ("aaaa", "bbbb"),                     // 完全越界（左）
+    ("key:000000", "key:000001"),         // 第一条
+    ("key:000100", "key:000100"),         // 空区间，落在块边界上
+  ]
+  for c in cases {
+    let (s, e) = c
+    let sb = @utf8.encode(s)
+    let eb = @utf8.encode(e)
+    let want : Array[Entry] = []
+    for en in all {
+      if compare_bytes(en.key, sb) >= 0 && compare_bytes(en.key, eb) < 0 {
+        want.push(en)
+      }
+    }
+    let got = r.scan_range(sb, eb)
+    assert_eq(got.length(), want.length())
+    for i in 0..<want.length() {
+      assert_eq(got[i].key, want[i].key)
+      assert_eq(got[i].value, want[i].value)
+      assert_eq(got[i].seq, want[i].seq)
+    }
+  }
+  // 逐条区间：start = 第 i 个 key，end = 第 i+1 个 key，必须恰好命中一条
+  for i in 0..<(n - 1) {
+    let got = r.scan_range(@utf8.encode(keys[i]), @utf8.encode(keys[i + 1]))
+    assert_eq(got.length(), 1)
+    assert_eq(got[0].key, @utf8.encode(keys[i]))
+  }
+}

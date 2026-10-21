@@ -70,6 +70,17 @@ pub struct KvPair {
 }
 
 ///|
+/// 直接构造一条键值。
+///
+/// 跨包不能写结构体字面量（`KvPair` 是只读类型），而 CLI 的 JSON 拼装、
+/// 下游的单元测试都需要「凭空造一条」的能力。`Entry::to_pair` 不够用：
+/// 它要求先有一个 `Entry`，而 `Entry` 带 `seq` 和墓碑标记，
+/// 对使用者来说是多余的。
+pub fn KvPair::new(key : Key, value : Value) -> KvPair {
+  { key, value }
+}
+
+///|
 /// 把内部条目转成对外键值。
 /// **调用方必须先过滤掉 `deleted = true` 的条目**，否则墓碑会泄漏出去。
 pub fn Entry::to_pair(self : Entry) -> KvPair {

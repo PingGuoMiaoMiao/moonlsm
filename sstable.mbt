@@ -341,3 +341,74 @@ pub fn SstReader::entries(self : SstReader) -> Array[Entry] raise LsmError {
   }
   out
 }
+
+///|
+/// 只解出 `[start, end)` 区间里的条目，顺序与 `entries()` 一致。
+///
+/// **这是 `scan` 的性能关键。** `entries()` 会把整个文件解出来 ——
+/// 一个 1 MiB 的 SST 大约 1 万条，扫 500 条也要付 1 万条的解码成本。
+/// 数据量一大，`scan` 就退化成 O(整个库)，而调用方往往只要一小段。
+///
+/// 做法是拿索引做**块级剪枝**：索引里每条记录的是该 block 的 `last_key`，
+/// 于是
+///
+/// - 二分找到第一个 `last_key >= start` 的 block —— 它之前的所有 block
+///   最大 key 都小于 start，整块可以跳过
+/// - 往后逐块解，块内逐条过滤（只有首尾两块可能部分越界）
+/// - 遇到 `last_key >= end` 的 block，解完它就停 —— block 之间按 key
+///   严格递增，后面每一块的 first_key 都更大，必然全部越界
+///
+/// 块内过滤而不是块内二分：一个 block 只有 4 KiB / 一百多条，
+/// 解出来再线性筛比再写一套「块内定位 + 向后遍历」简单得多，
+/// 而且这部分成本与块大小同阶，不是瓶颈。
+///
+/// **不接 `limit`**：单看一个文件，无法判断「前 N 条」是不是全局的前 N 条
+/// （多路归并要跨文件比较）。限制由调用方在归并之后施加。
+pub fn SstReader::scan_range(
+  self : SstReader,
+  start : Bytes,
+  end : Bytes,
+) -> Array[Entry] raise LsmError {
+  let out : Array[Entry] = []
+  let ies = self.index.entries()
+  // 二分：第一个 last_key >= start 的 block
+  let mut lo = 0
+  let mut hi = ies.length()
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if compare_bytes(ies[mid].key, start) < 0 {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  let mut i = lo
+  while i < ies.length() {
+    let ie = ies[i]
+    let (off, size) = match decode_handle(ie.value) {
+      Some(p) => p
+      None =>
+        raise LsmError::corruption(
+          "sst: 索引条目里的 block handle 解码失败",
+        )
+    }
+    if off + size > self.data.length() {
+      raise LsmError::corruption("sst: data block 越界")
+    }
+    let blk = match decode_block(self.data[off:off + size].to_owned()) {
+      Some(b) => b
+      None => raise LsmError::corruption("sst: data block 解码失败")
+    }
+    for e in blk.entries() {
+      if compare_bytes(e.key, start) >= 0 && compare_bytes(e.key, end) < 0 {
+        out.push(e)
+      }
+    }
+    // 这一块的 last_key 已经 >= end，后面的块必然全部越界
+    if compare_bytes(ie.key, end) >= 0 {
+      break
+    }
+    i = i + 1
+  }
+  out
+}

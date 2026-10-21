@@ -61,6 +61,19 @@ fn read_line() -> String? {
 ///|
 /// JSON 字符串转义。值里可能有引号或换行，不转义会产出非法 JSON。
 fn esc(s : String) -> String {
+  // 快路径：绝大多数 key / value 里一个需要转义的字符都没有。
+  // 先扫一遍确认，直接返回原串 —— 否则每个字符串都要走一遍
+  // 「逐字符拼接」（O(n²) 拷贝），500 行的 scan 光转义就要十几毫秒。
+  let mut needs_escape = false
+  for c in s {
+    if c == '"' || c == '\\' || c == '\n' || c == '\r' || c == '\t' {
+      needs_escape = true
+      break
+    }
+  }
+  if !needs_escape {
+    return s
+  }
   let mut out = ""
   for c in s {
     let piece = match c {
@@ -197,6 +210,36 @@ fn err(msg : String) -> String {
 }
 
 ///|
+/// 把扫描结果拼成 JSON 数组：`[["k1","v1"],["k2","v2"]]`。
+///
+/// 单独抽出来是为了能直接测。这段代码踩过两个坑，都只有端到端跑起来
+/// 才看得见，而端到端一跑就是几百毫秒、失败信息还是一坨 JSON：
+///
+/// 1. **`body = body + ...` 是 O(n²)。** 每次拼接都复制一遍已有内容，
+///    500 条 × 115 字节要拷十几 MB —— 占了 scan 端到端耗时的一大半，
+///    而引擎本身只花了几毫秒。
+/// 2. **`Buffer::to_string()` 不是 UTF-8 解码。** 它把每个字节当成一个
+///    码位映射出去，`[` 变成 `\u{225B}`，输出是一串乱码。
+///    必须走 `@utf8.decode_lossy(buf.to_bytes())`。
+fn items_json(items : Array[@moonlsm.KvPair]) -> String {
+  let body = Buffer::Buffer()
+  let mut first = true
+  for p in items {
+    if !first {
+      body.write_byte(@utf8.encode(",")[0])
+    }
+    first = false
+    let one = "[\"" +
+      esc(@utf8.decode_lossy(p.key)) +
+      "\",\"" +
+      esc(@utf8.decode_lossy(p.value)) +
+      "\"]"
+    body.write_bytes(@utf8.encode(one)[:])
+  }
+  "[" + @utf8.decode_lossy(body.to_bytes()) + "]"
+}
+
+///|
 /// 各层的 SST 文件数，形如 `[0,0,2]`。
 ///
 /// 固定输出 `NUM_LEVELS` 个数字，缺的层补 0 —— 数组长度随「当前用到第几层」
@@ -320,22 +363,7 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
           }
         None => 100
       }
-      let items = self.db.scan(start, end, limit)
-      let mut body = ""
-      let mut first = true
-      for p in items {
-        if !first {
-          body = body + ","
-        }
-        first = false
-        body = body +
-          "[\"" +
-          esc(@utf8.decode_lossy(p.key)) +
-          "\",\"" +
-          esc(@utf8.decode_lossy(p.value)) +
-          "\"]"
-      }
-      "{\"ok\":true,\"items\":[" + body + "]}"
+      "{\"ok\":true,\"items\":" + items_json(self.db.scan(start, end, limit)) + "}"
     }
     "flush" => {
       self.db.flush()

@@ -808,7 +808,10 @@ pub fn[S] Db::scan(
   let sources : Array[Array[Entry]] = []
   sources.push(self.mem.to_entries())
   for s in self.ssts {
-    sources.push(s.reader.entries())
+    // 用 `scan_range` 而不是 `entries()`：只解出落在 [start, end) 里的块。
+    // 全量解出的话，扫 500 条也要付「整个文件」的解码成本，
+    // 数据量一大 scan 就退化成 O(整个库)。
+    sources.push(s.reader.scan_range(start, end))
   }
   let it = MergeIterator::new(sources)
   let out : Array[KvPair] = []
