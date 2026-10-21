@@ -267,15 +267,23 @@ D6 同时改掉了一处「碰巧正确」的实现：归并后内存里 SST 的
 
 ### Week 3：能拿奖（打磨 + 展示）
 
-| 天 | 任务 | 验收 |
-|---|---|---|
-| D1 | `crash_test.py --rounds 20` | 20/20 通过 |
-| D2 | 手动截断 WAL / SST 的注入测试 | 不 panic，能降级恢复 |
-| D3 | `bench.py --n 1000000`，出对比表 | 有 vs moonkv / SQLite 的数据 |
-| D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 |
-| D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 |
-| D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 |
-| D7 | 申报书 + 90 秒 demo 视频 | 提交 |
+| 天 | 任务 | 验收 | 状态 |
+|---|---|---|---|
+| D1 | `crash_test.py --rounds 20` | 20/20 通过 | ✅（两个种子各 10 轮） |
+| D2 | 损坏注入测试（截断 / 单字节翻转 / 文件缺失） | 不 panic，策略与 `format.md` §5.3 一致 | ✅ |
+| D3 | `bench.py --n 1000000`，出对比表 | 有 vs moonkv / SQLite 的数据 | ⬜ |
+| D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 | ⬜ |
+| D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 | ⬜ |
+| D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 | ⬜ |
+| D7 | 申报书 + 90 秒 demo 视频 | 提交 | ⬜ |
+
+D2 的产出不只是测试，还有一张**损坏处理总表**（`format.md` §5.3）：
+按「坏在哪」分类，每类只有一个策略。判据始终是同一条 ——
+任何自动决策都不能丢已经承诺不丢的数据。所以 WAL 坏了截断（它只是暂存区），
+MANIFEST / SST 坏了拒绝启动（它们是已 ack 数据的唯一载体）。
+
+同时把「没有 block CRC」这个取舍量化了：173 字节的 SST 逐个位置翻转，
+42% 被拒绝、58% 被静默接受。这个数字比一句「暂不支持」有用得多。
 
 ---
 

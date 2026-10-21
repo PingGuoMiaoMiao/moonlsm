@@ -194,6 +194,25 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
 - `docs/adr/0007-compaction-levels-and-tombstones.md`：三个决策的完整记录
   （三层、整层下沉、墓碑丢弃规则），含写放大代价与四个遗留问题
 
+**损坏注入测试（Week 3 D2）**
+
+- `corruption_wbtest.mbt`：9 条用例，把「磁盘上的字节坏了」按位置分类验证
+  - WAL：中间某条 CRC 坏 / 长度字段被写坏 / 整个文件被清空 / 版本号不认识
+  - SST：被截断 / 被清空 / footer magic 被改坏 / MANIFEST 登记的文件不见了
+  - 拒绝启动的用例都断言**错误信息里带文件名** —— 只说「数据损坏」
+    等于没说，面对几百 MB 的目录无从下手
+  - 单字节翻转 fuzz：SST 里每一个字节逐个翻转，断言 `Db::open` 要么成功、
+    要么报 `Corruption`，**绝不 panic、绝不越界读**（ADR-0003 不变量 I3）
+- 注入必须用 `MemStorage::plant` 而不是 `Storage::write_file`：
+  后者只改「当前视图」，紧接着的 `power_loss()` 会用 durable 那份盖回去，
+  注入等于没做。第一版就是这么写的，四条用例全部「没有报错」
+- `format.md` 新增 §5.3「损坏处理总表」：九种损坏位置，每类只有一个策略，
+  判据始终是「任何自动决策都不能丢已经承诺不丢的数据」。
+  同时把「没有 block CRC」的代价量化了 —— 173 字节的 SST 逐个位置翻转，
+  **42% 被拒绝、58% 被静默接受**（这个数字进了测试注释，改 v1.1 时对照用）
+- `format.md` §6 待实现清单更新：WAL 与 MANIFEST 已标完成，补上
+  「data block 级 CRC（v1.1，会 bump `version` 到 2）」
+
 ### 变更
 
 - `dbcli` 的 `stats` 增加 `levels` 字段（如 `[2,0,2]`），固定输出 `NUM_LEVELS` 个数字。
