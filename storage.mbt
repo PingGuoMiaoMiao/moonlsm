@@ -36,6 +36,17 @@ pub trait Storage {
   fn append_file(Self, String, Bytes) -> Unit raise LsmError
 
   ///|
+  /// 批量追加：语义等价于对 `chunks` 里每一段依次调用 `append_file`，
+  /// 但**只打开一次文件**。
+  ///
+  /// 为什么需要单独一个方法：真文件系统上 `fopen`/`fclose` 的开销远大于
+  /// `fwrite`。在 Windows 上实测每次追加约 5.9 ms，而且与写入字节数几乎无关
+  /// —— 一个 200 条的 `putmany` 因此要 1.2 秒，其中 99% 花在反复开关文件上。
+  ///
+  /// 注意：这个方法**不隐含 sync**，和 `append_file` 一样。
+  fn append_frames(Self, String, Array[Bytes]) -> Unit raise LsmError
+
+  ///|
   /// 把已写入的数据刷到持久介质。返回后，这些字节必须能在断电后存活。
   ///
   /// 这是 C1 的唯一实现点。注意 `append_file` **不隐含** sync：
@@ -201,6 +212,29 @@ pub impl Storage for MemStorage with fn append_file(self, name, data) -> Unit ra
     None => data
   }
   self.files.set(name, merged)
+}
+
+///|
+/// 批量追加。内存后端没有「打开文件」的成本，所以这里刻意**退化成一次
+/// 拼接**而不是循环调用 `append_file`：N 次追加 N 次拼接是 O(N²) 的字节拷贝，
+/// 而先算总长再一次性写是 O(N)。
+///
+/// 语义必须与循环调用完全一致（同样的失败注入、同样的结果字节），
+/// 否则内存后端上的测试就不能代表真文件系统的行为了。
+pub impl Storage for MemStorage with fn append_frames(self, name, chunks) -> Unit raise LsmError {
+  self.guard_write(name)
+  if chunks.length() == 0 {
+    return
+  }
+  let b = Buffer::Buffer()
+  match self.files.get(name) {
+    Some(old) => b.write_bytes(old[:])
+    None => ()
+  }
+  for c in chunks {
+    b.write_bytes(c[:])
+  }
+  self.files.set(name, b.to_bytes())
 }
 
 ///|

@@ -4,12 +4,14 @@
 
 ```
 benches/python/
-├── README.md          ← 你在这里
-├── crash_test.py      ← 崩溃一致性（kill -9），比赛 demo 的核心镜头
-├── model_check.py     ← 正确性对拍（和内存 dict 比）
-├── bench.py           ← 性能基准（输出可直接贴 PPT 的表格）
-├── mock_dbcli.py      ← 假的实现，只用来验证上面三个脚本本身有效
-└── REFERENCES.md      ← 跨语言同类实现调研
+├── README.md            ← 你在这里
+├── crash_test.py        ← 崩溃一致性（kill -9），比赛 demo 的核心镜头
+├── model_check.py       ← 正确性对拍（和内存 dict 比）
+├── probe_persistence.py ← 探测引擎是否已支持持久化（决定要不要跑崩溃测试）
+├── bench.py             ← 性能基准（输出可直接贴 PPT 的表格）
+├── dbcli_launch.py      ← 数据目录/环境变量的唯一来源，三个脚本共用
+├── mock_dbcli.py        ← 假的实现，只用来验证上面三个脚本本身有效
+└── REFERENCES.md        ← 跨语言同类实现调研
 ```
 
 ---
@@ -132,8 +134,37 @@ python bench.py --cmd "python mock_dbcli.py --path ./data" --n 20000 --reads 200
 moon build --target native --release
 
 # 回到 benches/python
-python crash_test.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe --path ./data" --rounds 10
+python crash_test.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe" --rounds 10
 ```
+
+### 数据目录怎么传给 dbcli（一个真实的坑）
+
+`dbcli` **不接受 `--path` 参数**，数据目录走环境变量 `MOONLSM_DATA`。
+原因是那个进程的 stdin/stdout 已经被 JSON 协议占满了，再加命令行参数只会让
+所有驱动脚本的引号转义变复杂。
+
+代价是每个 `subprocess.Popen` 都必须显式把环境变量传下去。只要漏一处，
+dbcli 就退回默认的 `.moonlsm_data`，于是不同测试的数据混在同一个库里。
+实际症状极其难查 —— `model_check.py` 会报：
+
+```
+FAIL: 最终 scan key 集合不一致 got=161 want=160 extra=['probe:persistence']
+```
+
+看起来像引擎多返回了一个键（排序错？墓碑没生效？），其实是探测脚本写进去的那条。
+
+**所以三个脚本都不自己拼 env，统一走 `dbcli_launch.py`**：
+
+```python
+import dbcli_launch
+data_dir = dbcli_launch.resolve_dir(args.data_dir, "./data")
+env      = dbcli_launch.child_env(data_dir)
+subprocess.Popen(cmd, ..., env=env)
+```
+
+`resolve_dir` 刻意**不读**外部的 `MOONLSM_DATA`：`crash_test.py` 每轮会
+`rmtree` 数据目录，一旦继承外部变量就可能删掉真实数据。环境变量在这里只作为
+**输出**（传给子进程），绝不作为输入。
 
 ### 验证测试脚本本身有效（可选，但建议做一次）
 

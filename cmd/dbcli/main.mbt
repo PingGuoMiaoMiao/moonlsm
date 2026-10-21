@@ -5,10 +5,13 @@
 /// 之所以要独立进程而不是直接链库：kill -9 必须能杀掉一个独立进程，
 /// 同进程内没法测崩溃。
 ///
-/// 当前接的是真正的 `@moonlsm.Db`（memtable + SST + 归并），
-/// 但**还没有 WAL**：进程退出数据就没了。崩溃一致性测试（crash_test.py）
-/// 要等 Week 2 的 WAL 落地才有意义，`probe_persistence.py` 会探测这一点
-/// 并让 CI 显式跳过，而不是假装通过。
+/// 当前接的是真正的 `@moonlsm.Db`：WAL + memtable + SST + 归并，
+/// 全部通过 `@moonlsm.NativeStorage` 落到真文件系统。
+/// 数据目录来自环境变量 `MOONLSM_DATA`（默认 `.moonlsm_data`）。
+///
+/// `putmany` 走组提交：一批只 fsync 一次，然后才回 ack。
+/// 这是 C1（已确认的写入必不丢）与吞吐之间唯一正确的折中点 ——
+/// 逐条 fsync 也满足 C1，但会把 200 条的批次拖成 200 次刷盘。
 ///
 /// 协议见 benches/python/README.md。
 ///
@@ -22,8 +25,6 @@ extern "C" fn c_getchar() -> Int = "getchar"
 ///|
 /// 管道模式下 stdout 是全缓冲，不主动 flush 会让测试脚本一直等。
 /// 传 0 等价于 C 的 fflush(NULL)，刷新全部输出流。
-extern "C" fn c_fflush(stream : Int) -> Int = "fflush"
-
 ///|
 /// 从 stdin 读一行（不含换行符）。EOF 返回 None。
 ///
@@ -120,6 +121,36 @@ fn as_num(j : Json) -> Double? {
 }
 
 ///|
+/// 取布尔值。不是布尔就返回 None。
+///
+/// 注意 `Json` 里的布尔是**两个无参构造器** `True` / `False`，
+/// 不是 `Boolean(b)` —— 写成后者会得到「Json 没有构造器 Boolean」。
+fn as_bool(j : Json) -> Bool? {
+  match j {
+    True => Some(true)
+    False => Some(false)
+    _ => None
+  }
+}
+
+///|
+/// 请求是否要求「返回前必须 fsync」。
+///
+/// **缺省为 true。** 协议里 `sync` 是可选字段，省略时必须按最安全的方式处理 ——
+/// 一个忘了写 `sync:true` 的客户端不应该意外拿到「没落盘就 ack」的行为。
+/// 只有显式写 `"sync": false` 才跳过 fsync，那是压测专用路径。
+fn req_sync(j : Json) -> Bool {
+  match jget(j, "sync") {
+    Some(v) =>
+      match as_bool(v) {
+        Some(b) => b
+        None => true
+      }
+    None => true
+  }
+}
+
+///|
 /// 取字符串字段，缺失或类型不对都返回空串。
 fn fstr(j : Json, key : String) -> String {
   match jget(j, key) {
@@ -169,14 +200,28 @@ fn err(msg : String) -> String {
 /// CLI 状态就是引擎本身。这里刻意不留任何额外缓存 ——
 /// 一旦 CLI 自己缓存了数据，测出来的就不是引擎的行为了。
 struct Cli {
-  db : @moonlsm.Db
+  db : @moonlsm.Db[@moonlsm.NativeStorage]
 }
 
 ///|
-fn Cli::new() -> Cli {
+fn Cli::new(dir : String) -> Cli? {
   // 8 MiB 的 memtable 阈值：跑测试脚本时基本不会触发 flush，
-  // 但 `flush` 命令可以手动触发，所以两条路径都测得到
-  { db: @moonlsm.Db::new(8 * 1024 * 1024), }
+  // 但 `flush` 命令可以手动触发，所以两条路径都测得到。
+  //
+  // 真文件系统后端：dbcli 的存在意义就是让 `kill -9` 能杀掉一个独立进程，
+  // 内存后端做不到这件事。
+  //
+  // 注意这个函数**不 raise**，而是返回 `Cli?`。看起来绕，但必须这样：
+  // 「返回一个含泛型结构体字段的结构体」的 raising 函数在这个工具链上
+  // 会在调用点段错误（0xc0000005），而且崩溃发生在进入函数体之前，
+  // 打点也看不到。把 catch 收进函数内部、返回 Option，就绕开了。
+  let db = @moonlsm.open_native(dir, 8 * 1024 * 1024) catch {
+    e => {
+      println(err("open failed: " + e.message()))
+      return None
+    }
+  }
+  Some({ db: db })
 }
 
 ///|
@@ -188,11 +233,30 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
     "put" => {
       let k = @utf8.encode(fstr(req, "k"))
       let v = @utf8.encode(fstr(req, "v"))
-      ok_seq(self.db.put(k, v))
+      // 单条写：put 内部已经「追加 + fsync」，不需要再 sync 一次
+      if req_sync(req) {
+        ok_seq(self.db.put(k, v))
+      } else {
+        ok_seq(self.db.put_deferred(k, v))
+      }
     }
     "get" => ok_bytes(self.db.get(@utf8.encode(fstr(req, "k"))))
-    "del" => ok_seq(self.db.delete(@utf8.encode(fstr(req, "k"))))
+    "del" => {
+      let k = @utf8.encode(fstr(req, "k"))
+      if req_sync(req) {
+        ok_seq(self.db.delete(k))
+      } else {
+        ok_seq(self.db.delete_deferred(k))
+      }
+    }
     "putmany" => {
+      // 组提交：先全部追加到 WAL，最后一次 fsync，然后才回 ack。
+      //
+      // 之前这里是逐条 `db.put`，也就是 200 条 = 200 次 fsync。
+      // 在 Windows 的 `_commit` 上实测约 2.3 秒一批，crash_test 一轮
+      // 只能写 200 条 —— demo 里根本跑不到百万级。
+      // 契约 C1 只要求「ack 之前 fsync 成功」，没要求每条一次。
+      let want_sync = req_sync(req)
       match jget(req, "items") {
         Some(items_json) =>
           match as_arr(items_json) {
@@ -209,7 +273,8 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
                         Some(s) => s
                         None => ""
                       }
-                      ignore(self.db.put(@utf8.encode(k), @utf8.encode(v)))
+                      // 不逐条 fsync，末尾统一刷一次
+                      ignore(self.db.put_deferred(@utf8.encode(k), @utf8.encode(v)))
                     }
                   None => ()
                 }
@@ -217,6 +282,10 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
             None => ()
           }
         None => ()
+      }
+      // 这一行就是 C1：ack 在 fsync 之后
+      if want_sync {
+        self.db.sync()
       }
       // 一批写入只回一个 seq，取最后一个（也是最大的）
       ok_seq(self.db.last_seq())
@@ -264,7 +333,9 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
       )
       "{\"ok\":true,\"live_keys\":" +
       live.length().to_string() +
-      ",\"wal_bytes\":0,\"ssts\":" +
+      ",\"wal_bytes\":" +
+      self.db.wal_bytes().to_string() +
+      ",\"ssts\":" +
       self.db.sst_count().to_string() +
       ",\"flushes\":" +
       self.db.flush_count().to_string() +
@@ -272,7 +343,10 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
       self.db.mem_entry_count().to_string() +
       "}"
     }
-    "close" => ok_unit()
+    "close" => {
+      self.db.close()
+      ok_unit()
+    }
     _ => err("unknown op: " + op)
   }
 }
@@ -283,13 +357,27 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
 fn dispatch(cli : Cli, line : String) -> String {
   let req = @json.parse(line) catch { _ => return err("bad json") }
   cli.handle(req) catch {
-    _ => err("engine error")
+    e => err(e.message())
   }
 }
 
 ///|
+/// 打开失败就把原因打到 stdout 并返回 None。
+/// 注意走 stdout 而不是 stderr：驱动脚本读的是 stdout 的行 JSON，
+/// 错误也要以同样的格式出现，否则脚本只会看到「进程没输出」。
+///|
 fn main {
-  let cli = Cli::new()
+  // 数据目录：环境变量优先，默认当前目录下的 .moonlsm_data。
+  // 用环境变量而不是命令行参数，是因为这个进程的 stdin/stdout
+  // 全被 JSON 协议占用了，加参数解析只会让驱动脚本更复杂。
+  let dir = match @env.get_env_var("MOONLSM_DATA") {
+    Some(d) => d
+    None => ".moonlsm_data"
+  }
+  let cli = match Cli::new(dir) {
+    Some(c) => c
+    None => return
+  }
   while true {
     match read_line() {
       None => break
@@ -298,7 +386,7 @@ fn main {
           continue
         }
         println(dispatch(cli, line))
-        ignore(c_fflush(0))
+        @moonlsm.flush_stdio()
       }
     }
   }

@@ -221,16 +221,28 @@ CLI 手工驱动验证过「flush → 删除 → 再 flush → 读不到」这�
 | D1 | `crc32c.mbt` + `wal.mbt`：帧格式、恢复截断 | 任意位置截断都不 panic、只丢尾部 | ✅ |
 | D2 | `storage.mbt` + `fs_native.mbt`：存储后端抽象与真落盘 | 断电语义在 `moon test` 里可断言 | ✅ |
 | D3 | `manifest.mbt`：记录每层有哪些 SST，原子切换 | 重启后层信息正确 | ⬜ |
-| D4 | `db.mbt` 接入 `Storage`：WAL / SST 真落盘 | 进程重启数据还在 | ⬜ |
+| D4 | `db.mbt` 接入 `Storage`：WAL / SST 真落盘 | 进程重启数据还在 | ✅ |
+| D4b | 组提交：`putmany` 一批只 fsync 一次 | 200 条批次 1200ms → 12ms | ✅ |
 | D5 | `compaction.mbt`：L0 → L1 的简单合并 | 合并后数据不丢、墓碑保留 | ⬜ |
 | D6 | 分层触发条件 + 墓碑只在最底层丢弃 | 「删除后重写」用例通过 | ⬜ |
-| D7 | 全链路联调 | `crash_test.py --rounds 5` 全绿 | ⬜ |
+| D7 | 全链路联调 | `crash_test.py --rounds 5` 全绿 | ✅ |
 
 D2 是计划外插进来的，但它其实**必须先做**：ADR-0003 承诺了 C1「已确认的写入必不丢」，
 而 `kill -9` 根本测不出「忘了 fsync」（进程被杀时 OS 页缓存还在）。
 没有 `MemStorage` 的双影子模型，C1 在 CI 里没有任何证据。
 同时它把三个平台差异（`fsync`/`_commit`、`rename`/`MoveFileExA`、
 返回值约定相反）一次性收进了一个文件。详见 `docs/adr/0004-storage-abstraction.md`。
+
+D4b 也是计划外的，但它决定 demo 能不能成立。把 `db.mbt` 接上真落盘后，
+`crash_test.py` 一轮只能写 200 条 —— 因为每条 `put` 都在单独 fsync，
+而每次 `fopen`/`fclose` 在 Windows 上要 5.9ms。改成组提交后一轮能写 5 万条。
+详见 `docs/adr/0005-group-commit.md`。
+
+**D7 比 D3/D5/D6 先达成，这不是跳步。** 持久化的正确性只依赖
+「WAL 先落盘 + 恢复时先 SST 后 WAL」，与「SST 有几层」「层信息存在哪」无关。
+所以 `crash_test.py` 现在就能全绿，而 compaction 和 MANIFEST 解决的是
+**可扩展性**（文件数不能无限涨）而不是正确性。这个区分在答辩时值得讲清楚：
+先证明契约成立，再谈规模。
 
 **Week 2 结束时的状态**：功能完整，可以开始录 demo 了。
 

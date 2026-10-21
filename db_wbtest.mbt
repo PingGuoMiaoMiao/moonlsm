@@ -5,6 +5,13 @@
 /// 底层 SST 的旧值、多个 SST 同时存在时读的是不是最新的那条。
 
 ///|
+/// 用内存后端开一个库。断电语义由 `MemStorage::power_loss` 提供，
+/// 所以这一层可以在三个后端上跑，也不需要临时目录。
+fn open_mem(mem_limit : Int) -> Db[MemStorage] raise LsmError {
+  Db::open(MemStorage::new(), mem_limit)
+}
+
+///|
 fn kb(s : String) -> Bytes {
   @utf8.encode(s)
 }
@@ -31,7 +38,7 @@ fn expect_bytes(o : String?) -> Bytes? {
 
 ///|
 test "db: put 后能读到，覆盖写读到最新值" {
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   ignore(db.put(kb("a"), kb("1")))
   assert_eq(db.get(kb("a")), Some(kb("1")))
   ignore(db.put(kb("a"), kb("2")))
@@ -41,7 +48,7 @@ test "db: put 后能读到，覆盖写读到最新值" {
 
 ///|
 test "db: 删除后读不到，但墓碑还在（不能真删条目）" {
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   ignore(db.put(kb("a"), kb("1")))
   ignore(db.delete(kb("a")))
   assert_true(db.get(kb("a")) is None)
@@ -51,7 +58,7 @@ test "db: 删除后读不到，但墓碑还在（不能真删条目）" {
 
 ///|
 test "db: flush 之后数据仍然读得到" {
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   for i in 0..<100 {
     ignore(db.put(kb("k" + pad6(i)), kb("v" + i.to_string())))
   }
@@ -64,7 +71,7 @@ test "db: flush 之后数据仍然读得到" {
 
 ///|
 test "db: flush 之后覆盖写，读到的是新值" {
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   ignore(db.put(kb("a"), kb("旧")))
   db.flush()
   ignore(db.put(kb("a"), kb("新")))
@@ -79,7 +86,7 @@ test "db: flush 之后覆盖写，读到的是新值" {
 test "db: flush 之后删除，旧值必须被墓碑压住" {
   // 这是「删除失效」最典型的触发路径：
   // 旧值在 SST 里，墓碑在 memtable 里，get 必须让墓碑赢。
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   ignore(db.put(kb("a"), kb("v1")))
   ignore(db.put(kb("b"), kb("v2")))
   db.flush()
@@ -94,7 +101,7 @@ test "db: flush 之后删除，旧值必须被墓碑压住" {
 
 ///|
 test "db: scan 有序、左闭右开、过滤墓碑" {
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   for i in 0..<10 {
     ignore(db.put(kb("k" + pad6(i)), kb("v" + i.to_string())))
   }
@@ -110,7 +117,7 @@ test "db: scan 有序、左闭右开、过滤墓碑" {
 
 ///|
 test "db: scan 跨 memtable 与多个 SST 仍然是全局有序的" {
-  let db = Db::new(1 << 20)
+  let db = open_mem(1 << 20)
   // 三轮：每轮写一批、刷一次，制造 3 个 SST + 1 个 memtable
   for round in 0..<3 {
     for i in 0..<20 {
@@ -133,7 +140,7 @@ test "db: scan 跨 memtable 与多个 SST 仍然是全局有序的" {
 
 ///|
 test "db: memtable 写满会自动 flush" {
-  let db = Db::new(512)
+  let db = open_mem(512)
   for i in 0..<200 {
     ignore(db.put(kb("k" + pad6(i)), kb("value-" + i.to_string())))
   }
@@ -150,7 +157,7 @@ test "db: 差分测试 —— 2000 步随机操作与 Map 参考模型一致" {
   // 故意不共享任何实现细节，避免「两个同样的错误互相验证」。
   // mem_limit 故意设得很小（300 字节），让 2000 步里发生几十次 flush，
   // 否则整个测试只在 memtable 里跑，等于没测跨层
-  let db = Db::new(300)
+  let db = open_mem(300)
   let model : Map[String, String] = Map([])
   let rng = TestRng::new(777UL)
   let pool = 40
@@ -191,4 +198,274 @@ test "db: 差分测试 —— 2000 步随机操作与 Map 参考模型一致" {
   }
   // 差分测试跑完，确认真的经历了多次 flush，否则等于只测了 memtable
   assert_true(db.flush_count() > 5)
+}
+
+// ---------------------------------------------------------------------------
+// 持久化与崩溃恢复
+//
+// 这一组是 ADR-0003 里 C1「已确认的写入必不丢」的可执行版本。
+//
+// 为什么不用 kill -9：进程被杀时 OS 页缓存还在，下次读文件照样能读到。
+// 一个从不 fsync 的实现可以通过全部 kill -9 测试，然后在第一次真断电时
+// 丢掉已 ack 的写入。`MemStorage::power_loss()` 把「未落盘的内容」直接抹掉，
+// 正好补上这个盲区，而且不依赖虚拟机、不依赖操作系统、三个后端都能跑。
+// ---------------------------------------------------------------------------
+
+///|
+test "db: 未 flush 的写入在断电后从 WAL 恢复（C1）" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  ignore(db.put(kb("b"), kb("2")))
+  ignore(db.delete(kb("a")))
+  // memtable 全丢，磁盘上只剩 WAL —— 这就是「进程崩溃」的样子
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  // a 被删了，b 还在
+  assert_true(db2.get(kb("a")) is None)
+  assert_eq(db2.get(kb("b")), expect_bytes(Some("2")))
+}
+
+///|
+test "db: flush 之后断电，数据从 SST 恢复而不是 WAL" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("k1"), kb("v1")))
+  db.flush()
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  assert_eq(db2.get(kb("k1")), expect_bytes(Some("v1")))
+  assert_eq(db2.sst_count(), 1)
+  // flush 之后 WAL 被清空，只剩文件头
+  assert_eq(db2.wal_bytes(), 8)
+}
+
+///|
+test "db: flush 之后再写再断电，SST 与 WAL 的内容合并恢复" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("k1"), kb("old")))
+  db.flush()
+  ignore(db.put(kb("k1"), kb("new")))
+  ignore(db.put(kb("k2"), kb("v2")))
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  // k1 必须是新值：WAL 里的记录 seq 更大，归并时胜出
+  assert_eq(db2.get(kb("k1")), expect_bytes(Some("new")))
+  assert_eq(db2.get(kb("k2")), expect_bytes(Some("v2")))
+}
+
+///|
+test "db: 重开后 seq 单调递增，SST 编号不被复用" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  let s1 = db.put(kb("a"), kb("1"))
+  db.flush()
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  let s2 = db2.put(kb("b"), kb("2"))
+  // seq 必须严格更大：否则新写入在归并时会输给旧 SST 里的同 key 条目，
+  // 表现为「写进去读不出来」
+  assert_true(s2 > s1)
+  db2.flush()
+  // 编号从已有文件的最大值往后排，不能覆盖 SST-000001
+  assert_eq(db2.sst_count(), 2)
+  assert_eq(db2.get(kb("a")), expect_bytes(Some("1")))
+  assert_eq(db2.get(kb("b")), expect_bytes(Some("2")))
+}
+
+///|
+test "db: WAL 尾部有半条记录时，只丢那一条，其余完好（不 panic）" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  ignore(db.put(kb("b"), kb("2")))
+  let good_bytes = db.wal_bytes()
+  // 手工接上半帧垃圾并让它落盘，模拟「写到一半断电」
+  Storage::append_file(st, WAL_FILE, b"\x00\x00\x00\x00\x05\x01")
+  Storage::sync_file(st, WAL_FILE)
+  st.power_loss()
+  // 恢复过程不能 panic，只能丢尾部
+  let db2 = Db::open(st, 1 << 20)
+  assert_eq(db2.get(kb("a")), expect_bytes(Some("1")))
+  assert_eq(db2.get(kb("b")), expect_bytes(Some("2")))
+  // 坏尾巴被剪掉了：WAL 被重写成「只有完整好帧」的版本
+  assert_eq(db2.wal_bytes(), good_bytes)
+}
+
+///|
+test "db: WAL 文件头被改坏时重建空 WAL，而不是拒绝启动" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  db.flush()
+  // 把文件头改成垃圾
+  Storage::write_file(st, WAL_FILE, b"XXXX\x01\x00\x00\x00")
+  Storage::sync_file(st, WAL_FILE)
+  st.power_loss()
+  // 不抛错，能起来；已 flush 的数据在 SST 里，不受影响
+  let db2 = Db::open(st, 1 << 20)
+  assert_eq(db2.get(kb("a")), expect_bytes(Some("1")))
+  assert_eq(db2.wal_bytes(), 8)
+}
+
+///|
+test "db: fsync 失败时 put 必须抛错，且数据不能进 memtable" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put(kb("a"), kb("1")))
+  st.set_fail_sync(true)
+  // 调用方拿不到 ack
+  assert_true(
+    raises_lsm(fn() raise LsmError { ignore(db.put(kb("b"), kb("2"))) }),
+  )
+  // 关键：失败的写入不能出现在 memtable 里。否则「读得到、没持久」，
+  // 下次崩溃就凭空消失 —— 这比直接报错严重得多
+  assert_true(db.get(kb("b")) is None)
+  st.set_fail_sync(false)
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  assert_true(db2.get(kb("b")) is None)
+  assert_eq(db2.get(kb("a")), expect_bytes(Some("1")))
+}
+
+///|
+test "db: 空目录开库不报错，且立刻写下 WAL 文件头" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  assert_eq(db.sst_count(), 0)
+  assert_eq(db.last_seq(), 0UL)
+  assert_eq(db.wal_bytes(), 8)
+  assert_true(Storage::read_file(st, WAL_FILE) is Some(_))
+}
+
+///|
+test "db: close 之后读写都报 Closed，而不是静默继续用" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  db.close()
+  assert_true(
+    raises_lsm(fn() raise LsmError { ignore(db.put(kb("a"), kb("1"))) }),
+  )
+  assert_true(raises_lsm(fn() raise LsmError { db.flush() }))
+}
+
+///|
+test "db: 多次重启的累积状态正确" {
+  let st = MemStorage::new()
+  let mut round = 0
+  while round < 5 {
+    let db = Db::open(st, 1 << 20)
+    ignore(db.put(kb("r\{round}"), kb("v\{round}")))
+    if round % 2 == 0 {
+      db.flush()
+    }
+    db.close()
+    // 每一轮都「断电」，逼它从磁盘恢复
+    st.power_loss()
+    round = round + 1
+  }
+  let db = Db::open(st, 1 << 20)
+  for i in 0..<5 {
+    assert_eq(db.get(kb("r\{i}")), expect_bytes(Some("v\{i}")))
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 组提交（group commit）
+//
+// 契约没变：ack 之前 fsync 必须成功。变的只是「一批里 fsync 几次」。
+// 下面这组测试专门盯住「省掉的 fsync 有没有把 C1 一起省掉」。
+// ---------------------------------------------------------------------------
+
+///|
+test "db: put_deferred 不 fsync —— 断电后整批丢失，符合预期" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  // 先落一条基线，确认库本身是好的
+  ignore(db.put(kb("base"), kb("v")))
+  let before = st.syncs()
+  // 三条 deferred 写入：一条 fsync 都不该发生
+  ignore(db.put_deferred(kb("a"), kb("1")))
+  ignore(db.put_deferred(kb("b"), kb("2")))
+  ignore(db.delete_deferred(kb("base")))
+  assert_eq(st.syncs(), before)
+  // 内存里读得到（还没 ack，允许）
+  assert_eq(db.get(kb("a")), expect_bytes(Some("1")))
+  // 断电：这些写入必须整体消失，而不是读出半个值
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  assert_true(db2.get(kb("a")) is None)
+  assert_true(db2.get(kb("b")) is None)
+  // 基线那条是 put（已 fsync）写的，必须还在，且墓碑也丢了
+  assert_eq(db2.get(kb("base")), expect_bytes(Some("v")))
+}
+
+///|
+test "db: N 条 deferred + 1 次 sync，只 fsync 一次，且全部持久" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  let before = st.syncs()
+  let n = 200
+  for i in 0..<n {
+    ignore(db.put_deferred(kb("k\{i}"), kb("v\{i}")))
+  }
+  // 关键断言：200 条写入只花了 0 次 fsync
+  assert_eq(st.syncs(), before)
+  db.sync()
+  // 一次，不是 200 次
+  assert_eq(st.syncs(), before + 1)
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  for i in 0..<n {
+    assert_eq(db2.get(kb("k\{i}")), expect_bytes(Some("v\{i}")))
+  }
+}
+
+///|
+test "db: 组提交中途触发 flush，已 flush 的部分仍然持久" {
+  // mem_limit 设得很小，让 deferred 写入中途必定触发 flush。
+  // 这验证的是「flush 已经通过 SST 落盘的数据，不会因为还没 sync 而丢」。
+  let st = MemStorage::new()
+  let db = Db::open(st, 1024)
+  for i in 0..<60 {
+    ignore(db.put_deferred(kb("k\{i}"), kb("payload-payload-payload")))
+  }
+  assert_true(db.sst_count() > 0)
+  db.sync()
+  st.power_loss()
+  let db2 = Db::open(st, 1024)
+  for i in 0..<60 {
+    assert_eq(db2.get(kb("k\{i}")), expect_bytes(Some("payload-payload-payload")))
+  }
+}
+
+///|
+test "db: 组提交时 sync 失败必须抛错，调用方拿不到 ack" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  ignore(db.put_deferred(kb("a"), kb("1")))
+  st.set_fail_sync(true)
+  assert_true(raises_lsm(fn() raise LsmError { db.sync() }))
+  st.set_fail_sync(false)
+  // 没 sync 成功过，断电后必须丢
+  st.power_loss()
+  let db2 = Db::open(st, 1 << 20)
+  assert_true(db2.get(kb("a")) is None)
+}
+
+///|
+test "db: 组提交与逐条 put 混用，seq 仍然严格单调" {
+  let st = MemStorage::new()
+  let db = Db::open(st, 1 << 20)
+  let s1 = db.put(kb("a"), kb("1"))
+  let s2 = db.put_deferred(kb("b"), kb("2"))
+  db.sync()
+  let s3 = db.put(kb("c"), kb("3"))
+  assert_true(s2 > s1)
+  assert_true(s3 > s2)
+  // 覆盖写：后写的必须赢
+  ignore(db.put_deferred(kb("a"), kb("new")))
+  db.sync()
+  assert_eq(db.get(kb("a")), expect_bytes(Some("new")))
 }

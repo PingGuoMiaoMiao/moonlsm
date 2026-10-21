@@ -11,7 +11,11 @@
       exit 2  -> 命令本身起不来，这是真错误
 
 用法：
-  python probe_persistence.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data"
+  python probe_persistence.py --cmd "../../_build/native/debug/build/cmd/dbcli/dbcli.exe" \
+                              --data-dir ./probe-data
+
+  注意 --cmd 里**不要**再带数据目录：dbcli 从环境变量 MOONLSM_DATA 取，
+  由本脚本的 --data-dir 转成环境变量传给子进程（见 dbcli_launch.py）。
 
 在 CI 里的用法：
   if python probe_persistence.py --cmd "$CMD"; then
@@ -31,12 +35,16 @@ import subprocess
 import sys
 import threading
 
+import dbcli_launch
+
 
 PROBE_KEY = "probe:persistence"
 PROBE_VALUE = "hello-after-restart"
 
 
-def start_proc(cmd):
+def start_proc(cmd, env):
+    # env 必须带 MOONLSM_DATA，否则 dbcli 会写进默认的 .moonlsm_data，
+    # 污染同目录下的其它测试。见 dbcli_launch.py 的说明。
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -45,6 +53,7 @@ def start_proc(cmd):
         text=True,
         encoding="utf-8",
         bufsize=1,
+        env=env,
     )
     q = queue.Queue()
 
@@ -94,11 +103,13 @@ def stop_proc(proc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cmd", required=True, help="启动 dbcli 的命令（用引号包起来）")
-    ap.add_argument("--data-dir", default="./probe-data")
+    ap.add_argument("--data-dir", default=None,
+                    help="数据目录，默认 ./probe-data")
     args = ap.parse_args()
 
     cmd = shlex.split(args.cmd)
-    data_dir = os.path.abspath(args.data_dir)
+    data_dir = dbcli_launch.resolve_dir(args.data_dir, "./probe-data")
+    env = dbcli_launch.child_env(data_dir)
 
     # 每次探测都从干净目录开始，避免上一次的残留造成假阳性
     shutil.rmtree(data_dir, ignore_errors=True)
@@ -106,7 +117,7 @@ def main():
 
     # ---- 第一次启动：写入一条并确认 ----
     try:
-        proc, q = start_proc(cmd)
+        proc, q = start_proc(cmd, env)
     except Exception as e:
         print("FAIL: 无法启动 dbcli: %s" % e)
         return 2
@@ -123,7 +134,7 @@ def main():
 
     # ---- 第二次启动：看数据还在不在 ----
     try:
-        proc2, q2 = start_proc(cmd)
+        proc2, q2 = start_proc(cmd, env)
     except Exception as e:
         print("FAIL: 重启失败: %s" % e)
         return 2

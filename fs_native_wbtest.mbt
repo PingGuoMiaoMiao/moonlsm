@@ -72,6 +72,49 @@ test "storage: NativeStorage append 与 file_size 一致" {
 }
 
 ///|
+test "storage: NativeStorage append_frames 与逐次 append 结果完全一致" {
+  // append_frames 存在的唯一理由是省掉重复的 fopen/fclose，
+  // 所以它必须**在语义上和循环调用 append_file 完全等价**。
+  // 这条测试就是那个等价性断言：同样的输入，两条路径产出同样的字节。
+  let a = fresh_dir("frames_loop")
+  let b = fresh_dir("frames_batch")
+  let chunks : Array[Bytes] = [
+    bytes_of_str("AAA"), bytes_of_str(""), bytes_of_str("BB"),
+    bytes_of_str("CCCC"),
+  ]
+  Storage::write_file(a, "wal", bytes_of_str("HEAD"))
+  Storage::write_file(b, "wal", bytes_of_str("HEAD"))
+  for c in chunks {
+    Storage::append_file(a, "wal", c)
+  }
+  Storage::append_frames(b, "wal", chunks)
+  let ra = match Storage::read_file(a, "wal") {
+    Some(v) => v
+    None => fail("a/wal 应存在")
+  }
+  let rb = match Storage::read_file(b, "wal") {
+    Some(v) => v
+    None => fail("b/wal 应存在")
+  }
+  assert_eq(str_of_bytes(ra), str_of_bytes(rb))
+  assert_eq(str_of_bytes(rb), "HEADAAABBCCCC")
+  // 空批次不能创建文件，也不能改动已有内容（HEAD+AAA+BB+CCCC = 13）
+  Storage::append_frames(b, "wal", [])
+  assert_true(Storage::file_size(b, "wal") is Some(13))
+}
+
+///|
+test "storage: NativeStorage append_frames 对不存在的文件会创建它" {
+  // 与 "ab" 模式的语义保持一致：append 到不存在的文件等于新建。
+  let st = fresh_dir("frames_new")
+  Storage::append_frames(st, "wal", [bytes_of_str("X"), bytes_of_str("Y")])
+  match Storage::read_file(st, "wal") {
+    Some(v) => assert_eq(str_of_bytes(v), "XY")
+    None => fail("wal 应被创建")
+  }
+}
+
+///|
 test "storage: NativeStorage sync 不改变内容，且能对不存在的文件报错" {
   let st = fresh_dir("sync")
   Storage::write_file(st, "wal", bytes_of_str("AAA"))

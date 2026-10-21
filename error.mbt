@@ -23,3 +23,14 @@ pub fn LsmError::corruption(msg : String) -> LsmError {
 pub fn LsmError::closed() -> LsmError {
   Closed
 }
+
+///|
+/// 人类可读的错误描述。CLI 与日志用它，而不是自己 match 一遍——
+/// 错误类型的构造器将来会增加，散落各处的 match 会漏。
+pub fn LsmError::message(self : LsmError) -> String {
+  match self {
+    Io(m) => "Io: " + m
+    Corruption(m) => "Corruption: " + m
+    Closed => "Closed: 数据库已关闭"
+  }
+}

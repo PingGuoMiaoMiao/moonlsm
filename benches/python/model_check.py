@@ -24,17 +24,23 @@ import subprocess
 import sys
 import threading
 
+import dbcli_launch
+
 
 class Client:
-    def __init__(self, cmd):
+    def __init__(self, cmd, env):
         self.cmd = cmd
+        self.env = env
         self.proc = None
         self.q = None
 
     def start(self):
+        # env 里带 MOONLSM_DATA。漏传的后果见 dbcli_launch.py：
+        # 探测脚本写进去的 key 会混进本测试的 key 集合，报成「多了一个键」。
         self.proc = subprocess.Popen(
             self.cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
+            env=self.env,
         )
         self.q = queue.Queue()
 
@@ -104,13 +110,16 @@ def main():
     ap.add_argument("--ops", type=int, default=5000)
     ap.add_argument("--restart-every", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=None)
-    ap.add_argument("--data-dir", default="./data")
+    ap.add_argument("--data-dir", default=None, help="数据目录，默认 ./data")
     args = ap.parse_args()
+
+    data_dir = dbcli_launch.resolve_dir(args.data_dir, "./data")
+    env = dbcli_launch.child_env(data_dir)
 
     # 引擎是否已支持持久化？M1 阶段没有 WAL，重启必然丢数据。
     # 直接跑重启会得到几百条 FAIL，把真正的正确性错误淹掉 ——
     # 让测试自己适应阶段，比让人记住「这个阶段要加 --restart-every 0」可靠。
-    if args.restart_every and not _supports_persistence(args.cmd, args.data_dir):
+    if args.restart_every and not _supports_persistence(args.cmd, data_dir):
         print("注意: 引擎尚未支持持久化（无 WAL），已自动关闭重启测试。")
         print("      这不是失败。Week 2 加上 WAL 后，重启测试会自动恢复。")
         args.restart_every = 0
@@ -118,13 +127,13 @@ def main():
     seed = args.seed if args.seed is not None else int(time_seed())
     rng = random.Random(seed)
 
-    shutil.rmtree(os.path.abspath(args.data_dir), ignore_errors=True)
+    shutil.rmtree(data_dir, ignore_errors=True)
 
     # key 池里刻意放入前缀关系的 key，专门打排序/范围扫描的边界
     pool = ["a", "ab", "abc", "abcd", "b", "ba", "zzz"]
     pool += ["k%05d" % i for i in range(400)]
 
-    cli = Client(shlex.split(args.cmd)).start()
+    cli = Client(shlex.split(args.cmd), env).start()
     model = {}
     errors = []
     restarts = 0
@@ -175,7 +184,7 @@ def main():
 
         if args.restart_every and step % args.restart_every == 0:
             cli.stop()
-            cli = Client(shlex.split(args.cmd)).start()
+            cli = Client(shlex.split(args.cmd), env).start()
             restarts += 1
             # 重启后全量比对（抽样，避免太慢）
             sample = rng.sample(list(model.items()), min(200, len(model))) if model else []
@@ -189,7 +198,12 @@ def main():
     all_keys = sorted(model)
     got = cli.call({"op": "scan", "start": "", "end": "\uffff", "limit": 100000}).get("items") or []
     if [x[0] for x in got] != all_keys:
-        fail("最终 scan key 集合不一致 got=%d want=%d" % (len(got), len(all_keys)))
+        gk = [x[0] for x in got]
+        extra = [k for k in gk if k not in all_keys]
+        missing = [k for k in all_keys if k not in gk]
+        dup = sorted(set(k for k in gk if gk.count(k) > 1))
+        fail("最终 scan key 集合不一致 got=%d want=%d extra=%r missing=%r dup=%r"
+             % (len(got), len(all_keys), extra[:5], missing[:5], dup[:5]))
     for k in all_keys[:500]:
         if cli.call({"op": "get", "k": k}).get("v") != model[k]:
             fail("最终校验失败 key=%s" % k)

@@ -26,8 +26,13 @@ import sys
 import threading
 import time
 
+import dbcli_launch
 
-def start_proc(cmd):
+
+def start_proc(cmd, env):
+    # env 必须带 MOONLSM_DATA：崩溃测试每轮都会 rmtree 数据目录，
+    # 如果 dbcli 落回默认目录，就会「读到上一轮的数据」或「读到别的测试的数据」，
+    # 崩溃恢复的判定全部失真。见 dbcli_launch.py。
     proc = subprocess.Popen(
         cmd,
         stdin=subprocess.PIPE,
@@ -36,6 +41,7 @@ def start_proc(cmd):
         text=True,
         encoding="utf-8",
         bufsize=1,
+        env=env,
     )
     q = queue.Queue()
 
@@ -93,12 +99,13 @@ def make_batch(rng, key_space, value_size, batch):
 
 
 def run_round(args, rng, round_no):
-    data_dir = os.path.abspath(args.data_dir)
+    data_dir = args.data_dir
     shutil.rmtree(data_dir, ignore_errors=True)
     os.makedirs(data_dir, exist_ok=True)
 
     cmd = shlex.split(args.cmd)
-    proc, q = start_proc(cmd)
+    env = dbcli_launch.child_env(data_dir)
+    proc, q = start_proc(cmd, env)
 
     acked = {}
     pending = {}
@@ -124,7 +131,7 @@ def run_round(args, rng, round_no):
     hard_kill(proc)
 
     # ---- 重启验证 ----
-    proc2, q2 = start_proc(cmd)
+    proc2, q2 = start_proc(cmd, env)
     lost = []
     torn = []
     for k, v in acked.items():
@@ -178,8 +185,9 @@ def main():
 
     seed = args.seed if args.seed is not None else int(time.time())
     rng = random.Random(seed)
-    print("崩溃一致性测试 | seed=%d | %d 轮 | 每轮 %.1f-%.1fs\n"
-          % (seed, args.rounds, args.min_seconds, args.max_seconds))
+    args.data_dir = dbcli_launch.resolve_dir(args.data_dir, "./data")
+    print("崩溃一致性测试 | seed=%d | %d 轮 | 每轮 %.1f-%.1fs | 数据目录 %s\n"
+          % (seed, args.rounds, args.min_seconds, args.max_seconds, args.data_dir))
 
     results = []
     for i in range(1, args.rounds + 1):

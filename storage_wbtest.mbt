@@ -154,6 +154,52 @@ test "storage: sync 之后的追加若未再 sync，断电回退到上次 sync �
 }
 
 ///|
+test "storage: append_frames 与逐次 append 结果完全一致" {
+  // 内存后端的 append_frames 是一次性拼接，native 后端是一次 fopen，
+  // 两种实现完全不同。这条测试保证它们**语义等价**——
+  // 否则内存后端上跑绿的用例，换成真文件系统可能就不成立了。
+  let a = MemStorage::new()
+  let b = MemStorage::new()
+  let chunks : Array[Bytes] = [
+    bytes_of_str("AAA"), bytes_of_str(""), bytes_of_str("BB"),
+    bytes_of_str("CCCC"),
+  ]
+  Storage::write_file(a, "WAL-1", bytes_of_str("HEAD"))
+  Storage::write_file(b, "WAL-1", bytes_of_str("HEAD"))
+  for c in chunks {
+    Storage::append_file(a, "WAL-1", c)
+  }
+  Storage::append_frames(b, "WAL-1", chunks)
+  let ra = match Storage::read_file(a, "WAL-1") {
+    Some(v) => v
+    None => fail("a 应存在")
+  }
+  let rb = match Storage::read_file(b, "WAL-1") {
+    Some(v) => v
+    None => fail("b 应存在")
+  }
+  assert_eq(str_of_bytes(ra), str_of_bytes(rb))
+  assert_eq(str_of_bytes(rb), "HEADAAABBCCCC")
+  // 空批次是空操作，连文件都不该创建
+  Storage::append_frames(b, "ghost", [])
+  assert_true(Storage::read_file(b, "ghost") is None)
+}
+
+///|
+test "storage: append_frames 也遵守写入故障注入" {
+  // 批量路径不能成为「绕过故障注入」的后门
+  let st = MemStorage::new()
+  st.set_fail_write(true)
+  assert_true(
+    raises_lsm(fn() raise LsmError {
+      Storage::append_frames(st, "WAL-1", [bytes_of_str("X")])
+    }),
+  )
+  st.set_fail_write(false)
+  assert_true(Storage::read_file(st, "WAL-1") is None)
+}
+
+///|
 test "storage: 批量写只 sync 一次，断电后整批都在" {
   let st = MemStorage::new()
   for i in 0..<10 {

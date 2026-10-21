@@ -94,8 +94,53 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
     `fseek` 只能到 2 GiB
 - `docs/adr/0004-storage-abstraction.md`：决策记录，含三个平台坑的实测结论
 
+**真落盘（Week 2 D4）**
+
+- `db.mbt` 重写为 `Db[S]`：泛型 + 真 WAL + 真 SST，**进程重启数据还在**
+  - 写入顺序 `分配 seq → 追加 WAL 帧 → fsync WAL → 写 memtable → 可能刷盘`，
+    这是契约 C1 的全部内容
+  - `flush` 顺序 `写 SST → fsync SST → 读回校验 → 才清 memtable 和 WAL`
+  - `recover` 顺序 **先 SST 后 WAL**。反过来的话，SST 里的旧值会「碰巧」
+    因为 memtable 短路而读对，一旦 memtable 里没有那个 key 就暴露 ——
+    这种错在测试里极难复现
+  - `sst_name` 六位零填充：`list_files` 按字节序排序，不填充会让
+    `SST-10` 排在 `SST-9` 前面，恢复时新旧顺序整个反掉
+  - WAL 尾部截断用**重写**而不是 `ftruncate`（Windows CRT 没有该符号）
+  - trait 静态分发（`Db[S]` 泛型而非 trait object），无虚表开销
+- `fs_native.mbt` 新增 `open_native(dir, mem_limit)`：非泛型跨包入口，
+  让 `cmd/dbcli` 不必写 `Db[NativeStorage]` 的类型标注
+- `cmd/dbcli` 接真引擎，数据目录来自环境变量 `MOONLSM_DATA`
+  - 跨进程持久化手工验证通过：写入 → 重启 → 读回 → 目录里
+    `SST-000001` + `WAL-000001` 都在
+
+**组提交（Week 2 D4b）**
+
+- `Storage::append_frames(name, chunks)`：一次 `fopen` + N 次 `fwrite`
+  - 实测每次 `fopen`/`fclose` 在 Windows 上约 **5.9 ms**，且与写入字节数无关。
+    200 条的批次因此要 1.2 秒，其中 99% 是开关文件的开销
+  - `MemStorage` 实现为一次性拼接（循环 `append_file` 是 O(N²) 字节拷贝），
+    与 `NativeStorage` 的语义等价性由两个后端各一条测试锁住
+- `Db::put_deferred` / `delete_deferred` / `sync`：批量写路径
+  - `put_deferred` 把帧攒进 `pending`，`sync()` 时一次 `append_frames` + 一次 fsync
+  - `putmany(200)`：**1200 ms → 12 ms**；`crash_test` 单轮写入量 200 → 50000 条
+  - C1 不变：ack 发出之前 fsync 一定已成功。变的只是「一批里 fsync 几次」
+- `docs/adr/0005-group-commit.md`：决策记录，含「两条路径失败可见性不同」的说明
+
 ### 变更
 
+- **`put` 与 `put_deferred` 的失败可见性有意不同**（详见 ADR-0005）：
+  `put` 把 fsync 放在 memtable **之前**，fsync 失败时写入完全不可见；
+  `put_deferred` 做不到（写第一条时无法预知最后的 `sync` 会不会成功），
+  `sync` 失败时那批数据留在内存里可读、但无 ack、断电必丢。
+  两条路径因此**不合并** —— 合并会悄悄丢掉「fsync 失败 ⇒ 完全不可见」这个性质
+- `put_deferred` 不再逐帧写 WAL，帧留在内存里直到 `sync()`。
+  好处是行为**确定**（不再是「取决于 OS 什么时候回写页缓存」），
+  代价是崩溃后必然丢失 —— 本来就在「允许丢失」的范围内
+- `benches/python` 三个脚本的数据目录统一由 `dbcli_launch.py` 提供。
+  之前每个 `subprocess.Popen` 各自拼 env，漏一处 dbcli 就落回默认的
+  `.moonlsm_data`，症状是 `model_check.py` 报
+  `extra=['probe:persistence']` —— 看起来像引擎多返回了一个键，
+  实际上是探测脚本写进了同一个库
 - `model_check.py` 现在会先探测引擎是否支持持久化，不支持时**自动关闭重启测试**
   并打印说明。默认 `--restart-every 1000` 在没有 WAL 的阶段必然产生几百条假 FAIL，
   把真正的正确性错误淹掉。Week 2 加上 WAL 后，重启测试会自动恢复，不需要改脚本
@@ -129,12 +174,26 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
 - `NativeStorage::prepare` 第一版只 `mkdir` 一次，而 `mkdir` 不建父目录，
   测试目录 `.moonlsm_test/rw` 拿到 `ENOENT`。改为逐级创建
 
+`dbcli` 一启动就段错误（`0xc0000005`），排查耗时最长的一个：
+
+- **同一个 C 符号被两处不同签名的 `extern "C"` 声明，指针在调用点被截断。**
+  `cmd/dbcli` 自己声明了 `extern "C" fn fflush(Int) -> Int`，而库内按
+  `UInt64` 传 `FILE*`；编译器只保留其中一个原型，于是 `FILE*` 被截成 32 位，
+  `fflush` 内部解引用野指针
+- 定位过程：`println` 打点被缓冲吞掉 → 换成带 `fflush` 的 `dbg()` →
+  发现「`Db::open` 函数体根本没进去」→ 逐个排除（最小 main 正常、
+  结构体包装正常、`read_line` 正常、非泛型入口仍崩）→
+  最后靠「移除 dbcli 里的 `c_fflush` 调用」一次性解决
+- 修法：库内提供 `pub fn flush_stdio()` 作为 `fflush` 的**唯一声明点**，
+  dbcli 改调它。这类 bug 的教训不是「小心一点」，而是
+  **同一个 C 符号只能有一个声明点**
+
 ### 计划中（v0.2.0 · Week 2 剩余）
 
 - `manifest.mbt`：§4 的全量快照 + CURRENT 原子 rename
-- `db.mbt` 接入 `Storage`：WAL 真落盘、SST 真落盘、`open(path)` / `close()`
 - `compact.mbt`：L0 → L1 的归并 compaction，输出后清理输入
-- 崩溃测试从 `MemStorage` 的进程内断电，扩展到真进程 + `kill -9`（L2）
+- 分层触发条件 + 墓碑只在最底层丢弃
+- 崩溃测试从「5 轮手工验收」升级为 CI 门禁（G4）
 
 ### 已知技术债
 
@@ -145,7 +204,10 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
   改成惰性的 block 级迭代器是 v1.1 的事（接口不变）
 - 没有 compaction，SST 数量只增不减，读路径的 SST 扫描是 O(文件数)
 - `NativeStorage` 每次文件操作都 `fopen` / `fclose`，不保持常开句柄。
-  语义正确但压测时会明显慢；优化点是引入带缓冲的句柄表（M3 之后）
+  批量路径已经用 `append_frames` 把「一批只开关一次」解决掉了
+  （见 ADR-0005，200 条批次 1200ms → 12ms），但**单条 `put` 仍是每次
+  开关文件两次**（一次 `append_file`、一次 `sync_file`），约 5.9 ms。
+  彻底的解法是带缓冲的句柄表，代价是 fd 生命周期要显式管理
 - `list_files` 依赖运行时的 `moonbit_read_dir_ffi`，它在 `opendir` 失败时
   返回 `NULL`，到了 MoonBit 侧就是一个空指针的 `FixedArray`——访问会段错误。
   目前靠「先 `prepare()` 保证目录存在」规避，长期应该换掉

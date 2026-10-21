@@ -268,6 +268,25 @@ fn NativeStorage::open_or_fail(
 }
 
 ///|
+/// 把 stdio 缓冲推到 OS。CLI 每输出一行就要调一次——管道下的 stdout
+/// 是块缓冲的，不推的话驱动脚本读不到输出。
+///
+/// ⚠️ **不要在别处再声明一次 `fflush`**。
+///
+/// 同一个 C 符号被两处不同签名的 `extern "C"` 声明时，编译器只会保留
+/// 其中一个原型。如果其中一处写的是 `Int`（32 位），而库内按 `UInt64`
+/// 传 `FILE*`，指针会在调用点被截断成 32 位——症状是 `fflush` 内部
+/// 段错误，而崩溃点跟调用方看起来毫无关系。
+///
+/// 这个 bug 真的发生过：`cmd/dbcli` 自己声明了一份
+/// `extern "C" fn fflush(Int) -> Int`，结果整个 CLI 一启动就
+/// `0xc0000005`，排查了很久才定位到「两个签名不一致」。
+/// 统一从这里出去，就只有一个声明点了。
+pub fn flush_stdio() -> Unit {
+  ignore(c_fflush(0UL))
+}
+
+///|
 /// 目录 fsync。POSIX 专用；Windows 上是空操作（见文件头的说明）。
 ///
 /// 条件编译只能加在**条目**（函数、let）上，不能加在语句块上，
@@ -305,15 +324,31 @@ pub impl Storage for NativeStorage with fn prepare(self) -> Unit raise LsmError 
   if self.root == "" {
     return
   }
-  let mut acc = ""
-  for part in self.root.split("/") {
-    let seg = part.to_owned()
-    if seg == "" || seg == "." {
-      continue
+  mkdir_chain(self.root)
+}
+
+///|
+/// 逐级建目录，**保留原有的路径形态**。
+///
+/// 不能用「按 `/` 切开再拼接」的写法：那样会把开头的 `/` 丢掉，
+/// `/tmp/x` 会变成 `tmp/x`，于是目录建到了当前目录下，
+/// 而后续的 `fopen("/tmp/x/...")` 仍然指向不存在的地方。
+/// 症状是「第一次打开就段错误」，排查时完全看不出跟路径有关。
+///
+/// 所以这里改成「在每个分隔符处截一个前缀」，前缀天然带着开头的 `/`
+/// 和 Windows 的盘符。
+fn mkdir_chain(path : String) -> Unit {
+  let b = @utf8.encode(path)
+  for i in 1..<b.length() {
+    // '/' = 47, '\\' = 92。Windows 上两种分隔符都要认
+    if b[i].to_int() == 47 || b[i].to_int() == 92 {
+      let prefix = @utf8.decode_lossy(take_prefix(b, i))
+      if prefix.length() > 0 {
+        ignore(mkdir_at(cstr(prefix)))
+      }
     }
-    acc = if acc == "" { seg } else { acc + "/" + seg }
-    ignore(mkdir_at(cstr(acc)))
   }
+  ignore(mkdir_at(cstr(path)))
 }
 
 ///|
@@ -349,6 +384,40 @@ pub impl Storage for NativeStorage with fn write_file(self, name, data) -> Unit 
 pub impl Storage for NativeStorage with fn append_file(self, name, data) -> Unit raise LsmError {
   let f = self.open_or_fail(name, "ab")
   let err = write_all_to(f, data, name)
+  ignore(c_fflush(f))
+  ignore(c_fclose(f))
+  if err != "" {
+    raise LsmError::io(err)
+  }
+}
+
+///|
+/// 批量追加：**一次 fopen，N 次 fwrite，一次 fclose**。
+///
+/// 这不是微优化，是量级差异。Windows 上实测单次 `fopen`+`fclose`
+/// 约 5.9 ms（杀软实时扫描 / 句柄创建都算在内），而 `fwrite` 几百字节
+/// 几乎免费。所以 200 条的批次：
+///
+/// ```
+/// 循环 append_file : 200 × 5.9ms ≈ 1180 ms
+/// append_frames    :   1 × 5.9ms + 200 × ~0 ≈    6 ms
+/// ```
+///
+/// 实测从 1200ms 降到 6ms，两个数量级。
+///
+/// 出错时先 fclose 再抛错，不留泄漏的句柄（与 `write_all_to` 的约定一致）。
+pub impl Storage for NativeStorage with fn append_frames(self, name, chunks) -> Unit raise LsmError {
+  if chunks.length() == 0 {
+    return
+  }
+  let f = self.open_or_fail(name, "ab")
+  let mut err = ""
+  for c in chunks {
+    // 一旦出错就停：继续写只会产生更多垃圾，而且错误信息会被后面的覆盖
+    if err == "" {
+      err = write_all_to(f, c, name)
+    }
+  }
   ignore(c_fflush(f))
   ignore(c_fclose(f))
   if err != "" {
@@ -414,10 +483,17 @@ pub impl Storage for NativeStorage with fn list_files(self, prefix) -> Array[
   // 里的 moonbit_read_dir_ffi），它已经把两边都封好了。
   //
   // 前提：目录必须存在。运行时实现在 opendir 失败时返回 NULL，
-  // 而这个 NULL 到了 MoonBit 侧就是一个空指针的 Array——访问它
-  // 会直接段错误，不是可捕获的错误。所以这里先 prepare 一遍。
+  // 而这个 NULL 到了 MoonBit 侧就是一个空指针的 FixedArray——访问它
+  // 会直接段错误，不是可捕获的错误。
+  //
+  // 只靠「先 prepare」不够：prepare 自己也可能因为权限之类的原因失败。
+  // 所以这里再用一次存在性检查兜底，宁可返回空列表也不要崩。
   Storage::prepare(self)
-  let names = c_read_dir(self.dir())
+  let dir = self.dir()
+  if c_is_dir(dir) != 1 {
+    return []
+  }
+  let names = c_read_dir(dir)
   let out : Array[String] = []
   for i in 0..<names.length() {
     let s = @utf8.decode_lossy(names[i])
@@ -434,3 +510,20 @@ pub impl Storage for NativeStorage with fn list_files(self, prefix) -> Array[
 /// 布局与 `Array[Bytes]` 一致，所以可以直接声明成这个类型。
 #borrow(path)
 extern "C" fn c_read_dir(path : Bytes) -> FixedArray[Bytes] = "moonbit_read_dir_ffi"
+
+///|
+/// 目录存在性检查。同样是运行时导出：1 = 是目录，0 = 存在但不是目录，
+/// -1 = 不存在或无法访问。用它给 `c_read_dir` 做前置守卫。
+#borrow(p)
+extern "C" fn c_is_dir(p : Bytes) -> Int = "moonbit_is_dir_ffi"
+
+///|
+/// 用 native 后端打开数据库。
+///
+/// 这是一个**非泛型**入口，专门给跨包调用方（`cmd/dbcli`）用。
+/// 直接跨包调 `Db::open(storage, ...)` 会在进入函数体之前就段错误——
+/// 泛型结构体按值跨包传递在这个工具链版本上不可靠。
+/// 包一层非泛型函数把实例化点留在库内，就绕开了这个问题。
+pub fn open_native(dir : String, mem_limit : Int) -> Db[NativeStorage] raise LsmError {
+  Db::open(NativeStorage::new(dir), mem_limit)
+}

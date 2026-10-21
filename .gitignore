@@ -10,6 +10,10 @@ target
 # 测试脚本产生的数据目录
 benches/python/data/
 benches/python/probe-data/
+benches/python/_t/
+
+# dbcli 在没设 MOONLSM_DATA 时的默认数据目录
+.moonlsm_data/
 
 # 单元测试里的真文件系统用例（storage_wbtest / fs_native_wbtest）
 .moonlsm_test/

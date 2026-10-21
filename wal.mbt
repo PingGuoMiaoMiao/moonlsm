@@ -291,3 +291,24 @@ pub fn WalReplay::replay_into(
   }
   applied
 }
+
+///|
+/// 编码**单帧**，不含 8 字节文件头。
+///
+/// 追加写 WAL 时用：文件头只在创建时写一次，之后的每一次 `put` 都只是
+/// 往文件尾追加一帧。如果每次都调 `WalWriter::new()` 再整体写出，
+/// 文件头会被反复追加，恢复时第一帧就会解错。
+pub fn encode_frame(rec : WalRecord) -> Bytes {
+  let w = WalWriter::new()
+  w.append(rec)
+  let all = w.to_bytes()
+  let out = Buffer::Buffer()
+  out.write_bytes(all[WAL_HEADER_SIZE:])
+  out.to_bytes()
+}
+
+///|
+/// 空 WAL 的文件字节（只有文件头）。创建新 WAL 时用。
+pub fn empty_wal_bytes() -> Bytes {
+  WalWriter::new().to_bytes()
+}
