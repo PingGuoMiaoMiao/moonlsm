@@ -193,6 +193,25 @@ fn MemStorage::guard_write(
 }
 
 ///|
+/// 显式声明「trait 方法同时作为 `MemStorage` 的普通方法可用」。
+///
+/// 不写这行的后果（新版工具链）：`[0079] implicit_impl_as_method` ——
+/// `impl` 里的方法被**隐式**提升为类型自身的普通方法，这个隐式行为已废弃。
+/// 本地 0.1.20260827 没有这条检查，所以本地零警告、CI 全红。
+pub extend MemStorage with Storage::{
+  list_files,
+  rename_file,
+  append_frames,
+  prepare,
+  write_file,
+  append_file,
+  file_size,
+  read_file,
+  remove_file,
+  sync_file,
+}
+
+///|
 pub impl Storage for MemStorage with fn prepare(_self) -> Unit raise LsmError {
 
 }

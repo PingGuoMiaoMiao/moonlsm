@@ -313,6 +313,22 @@ fn sync_dir_at(dir : Bytes) -> Unit {
 }
 
 ///|
+/// 显式声明「trait 方法同时作为 `NativeStorage` 的普通方法可用」。
+/// 理由见 `storage.mbt` 里 `MemStorage` 那处同样的声明。
+pub extend NativeStorage with Storage::{
+  list_files,
+  rename_file,
+  append_frames,
+  prepare,
+  write_file,
+  append_file,
+  file_size,
+  read_file,
+  remove_file,
+  sync_file,
+}
+
+///|
 /// 建目录。
 ///
 /// `mkdir` 只建一级，父目录不存在就失败（Windows 返回 ENOENT，POSIX 同理）。
