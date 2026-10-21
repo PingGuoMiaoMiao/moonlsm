@@ -152,6 +152,21 @@ pub fn Version::total_ssts(self : Version) -> Int {
 }
 
 ///|
+/// 某一层所有 SST 的字节数之和。
+///
+/// 归并触发条件用它，而不是「文件个数」—— 除了 L0。原因：
+/// L0 的文件大小由 memtable 上限决定，个数就能代表体量；而 L1 及以下
+/// 的文件是按 `COMPACT_TARGET_SST` 切的，个数多只说明数据多，
+/// 真正决定「这层该不该往下沉」的是总字节数。
+pub fn Version::level_bytes(self : Version, idx : Int) -> UInt64 {
+  let mut total = 0UL
+  for m in self.level(idx) {
+    total = total + m.file_size
+  }
+  total
+}
+
+///|
 /// 从编号空间里取一个新编号。
 pub fn Version::alloc_file_number(self : Version) -> UInt64 {
   let n = self.next_file_number

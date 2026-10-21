@@ -36,8 +36,8 @@
 pub struct Db[S] {
   storage : S
   mem : MemTable
-  /// 从新到旧。
-  ssts : Array[SstReader]
+  /// 从新到旧。带上编号是因为 compaction 需要知道「要删哪个文件」。
+  ssts : Array[LoadedSst]
   /// memtable 字节阈值，超过就自动刷盘。
   mem_limit : Int
   mut seq : UInt64
@@ -65,6 +65,16 @@ pub struct Db[S] {
   pending : Array[Bytes]
   mut wal_bytes : Int
   mut closed : Bool
+}
+
+///|
+/// 一个已加载的 SST。编号来自文件名，`reader` 是解析后的内容。
+///
+/// 之所以不只用 `SstReader`：compaction 要把「被归并掉的文件」从内存视图里
+/// 摘掉，而 `SstReader` 本身不记得自己叫什么。
+pub struct LoadedSst {
+  num : UInt64
+  reader : SstReader
 }
 
 ///|
@@ -184,7 +194,7 @@ fn[S : Storage] Db::recover(self : Db[S]) -> Unit raise LsmError {
           max_seq = e.seq
         }
       }
-      self.ssts.push(r)
+      self.ssts.push({ num: meta.number, reader: r })
     }
   }
   let wpath = self.wal_name()
@@ -400,6 +410,26 @@ pub fn[S] Db::wal_name(self : Db[S]) -> String {
 /// 当前 MANIFEST 的名字（`MANIFEST-000007`）。空串表示还没写过。
 pub fn[S] Db::manifest_name(self : Db[S]) -> String {
   self.current_manifest
+}
+
+///|
+/// 按编号找已加载的 SST。找不到说明内存视图和 `version` 不一致 ——
+/// 这是内部不变量的破坏，不是用户错误，所以直接报 Corruption。
+fn[S] Db::find_reader(self : Db[S], num : UInt64) -> SstReader raise LsmError {
+  for s in self.ssts {
+    if s.num == num {
+      return s.reader
+    }
+  }
+  raise LsmError::corruption(
+    "内部状态不一致：版本里引用了 sst/\{pad_num(num)}，但内存里没有加载它",
+  )
+}
+
+///|
+/// 版本快照是否满足全部语义不变量。测试用它确认归并之后 L1 仍不重叠。
+pub fn[S] Db::check_version_invariants(self : Db[S]) -> Bool {
+  self.version.check_invariants()
 }
 
 ///|
@@ -731,7 +761,7 @@ pub fn[S : Storage] Db::flush(self : Db[S]) -> Unit raise LsmError {
     Closed => ()
   }
   // 6. 内存状态收尾
-  self.ssts.insert(0, reader)
+  self.ssts.insert(0, { num: sst_num, reader })
   self.mem.clear()
   // `pending` 里的帧对应的记录全都在 memtable 里，也就全都进了刚落盘的
   // 这个 SST。SST 已经 fsync 过，所以这些帧可以安全丢弃 —— 不丢的话，
@@ -740,6 +770,10 @@ pub fn[S : Storage] Db::flush(self : Db[S]) -> Unit raise LsmError {
   self.pending.clear()
   self.wal_bytes = empty.length()
   self.flush_count = self.flush_count + 1
+  // 刷完之后看 L0 是不是该归并了。放在 flush 末尾而不是单独的后台线程：
+  // v1 没有并发控制，后台 compaction 会和写入抢同一个 version，
+  // 引入的锁比它能省下的延迟更值得担心。
+  self.maybe_compact()
 }
 
 ///|
@@ -750,8 +784,8 @@ pub fn[S] Db::get(self : Db[S], key : Bytes) -> Bytes? {
     Some(e) => return if e.deleted { None } else { Some(e.value) }
     None => ()
   }
-  for r in self.ssts {
-    match r.get(key) {
+  for s in self.ssts {
+    match s.reader.get(key) {
       Some(e) => return if e.deleted { None } else { Some(e.value) }
       None => ()
     }
@@ -773,8 +807,8 @@ pub fn[S] Db::scan(
 ) -> Array[KvPair] raise LsmError {
   let sources : Array[Array[Entry]] = []
   sources.push(self.mem.to_entries())
-  for r in self.ssts {
-    sources.push(r.entries())
+  for s in self.ssts {
+    sources.push(s.reader.entries())
   }
   let it = MergeIterator::new(sources)
   let out : Array[KvPair] = []

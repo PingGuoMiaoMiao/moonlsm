@@ -197,6 +197,24 @@ fn err(msg : String) -> String {
 }
 
 ///|
+/// 各层的 SST 文件数，形如 `[0,0,2]`。
+///
+/// 固定输出 `NUM_LEVELS` 个数字，缺的层补 0 —— 数组长度随「当前用到第几层」
+/// 变化的话，看日志的人得先数逗号才知道哪个是 L2。
+fn levels_json(db : @moonlsm.Db[@moonlsm.NativeStorage]) -> String {
+  let mut s = "["
+  let mut i = 0
+  while i < @moonlsm.NUM_LEVELS {
+    if i > 0 {
+      s = s + ","
+    }
+    s = s + db.level_sst_count(i).to_string()
+    i = i + 1
+  }
+  s + "]"
+}
+
+///|
 /// CLI 状态就是引擎本身。这里刻意不留任何额外缓存 ——
 /// 一旦 CLI 自己缓存了数据，测出来的就不是引擎的行为了。
 struct Cli {
@@ -341,6 +359,10 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
       self.db.flush_count().to_string() +
       ",\"mem_entries\":" +
       self.db.mem_entry_count().to_string() +
+      ",\"levels\":" +
+      // 每层几个文件。归并是否正确光看总数看不出来 ——
+      // 「L0 攒到 4 个」和「L1 只剩 2 个」这两个事实必须分开看。
+      levels_json(self.db) +
       "}"
     }
     "close" => {

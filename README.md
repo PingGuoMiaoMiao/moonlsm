@@ -46,14 +46,14 @@ moon test                         # 单元测试
 moon build --target native        # 构建 dbcli
 ```
 
-十秒看到它在工作（管道喂 JSON）：
+十秒看到它在工作（管道喂 JSON，数据目录由 `MOONLSM_DATA` 指定）：
 
 ```bash
 printf '%s\n' \
   '{"op":"put","k":"user:1","v":"alice","sync":true}' \
   '{"op":"get","k":"user:1"}' \
   '{"op":"scan","start":"user:","end":"user;","limit":10}' \
-  | ./_build/native/debug/build/cmd/dbcli/dbcli.exe --path ./data
+  | MOONLSM_DATA=./data ./_build/native/debug/build/cmd/dbcli/dbcli.exe
 ```
 
 ```
@@ -62,27 +62,41 @@ printf '%s\n' \
 {"ok":true,"items":[["user:1","alice"]]}
 ```
 
-> **当前进度：Week 1 完成。** 写 → memtable → 刷 SST → 归并读回这条路径已打通，
-> `model_check.py` 2000 步对拍零错误。但**还没有 WAL**，进程退出数据就丢；
-> 也还没有 compaction，SST 数量只增不减。Week 2 补这两块。
+再跑一次 `{"op":"get","k":"user:1"}` —— 换成新进程，数据还在。
+磁盘上会看到 `CURRENT` / `MANIFEST-*` / `wal/<n>.wal` / `sst/<n>.sst`。
+
+> **当前进度：Week 2 完成。** WAL + MANIFEST + 三层 compaction 全部打通：
+> 写入先落 WAL 再 ack，`kill -9` 不丢已确认数据（`crash_test.py --rounds 20` 全绿），
+> 重启后层信息从 MANIFEST 恢复，L0 攒够 4 个文件自动归并、L1 超过 1 MiB 自动下沉。
 > 完整的验收步骤见 [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md)。
 
 ---
 
-## API（设计稿，尚未全部实现）
+## API
 
 ```moonbit
-// 已经能用的（内存实例，无持久化）
-let db = @moonlsm.Db::new(8 * 1024 * 1024)   // memtable 阈值
-db.put(b"key", b"value")!                     // -> UInt64 (seq)
-let v = db.get(b"key")                        // -> Bytes?，删除也是 None
-db.delete(b"key")!
-let rows = db.scan(b"a", b"z", 100)!          // [start, end)
-db.flush()!                                   // memtable -> SST
+// 真文件系统（数据目录、memtable 阈值）
+let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)!
 
-// 还没做的（需要文件 IO 层与 WAL）
-// @moonlsm.open("data")! / db.close()!
+let seq = db.put(b"key", b"value")!      // 返回即代表已落盘（fsync 已成功）
+let v = db.get(b"key")                   // Bytes?，删除也是 None
+db.delete(b"key")!
+let rows = db.scan(b"a", b"z", 100)!     // [start, end)
+db.flush()!                              // memtable -> L0，必要时触发归并
+db.close()
+
+// 内存后端：同一套 API，断电语义可以在 `moon test` 里直接断言
+let mem = @moonlsm.MemStorage::new()
+let db2 = @moonlsm.Db::open(mem, 1 << 20)!
+
+// 批量写：一批只 fsync 一次，`sync()` 返回即代表整批已落盘
+for i in 0..<200 { db.put_deferred(k, v)! }
+db.sync()!
 ```
+
+> **`put` 与 `put_deferred` 的失败可见性不同**：`put` 在 fsync 成功之后才改
+> memtable，失败时写入完全不可见；`put_deferred` 做不到这一点（写第一条时
+> 无法预知最后的 `sync` 会不会成功）。详见 ADR-0005。
 
 ---
 
@@ -90,14 +104,19 @@ db.flush()!                                   // memtable -> SST
 
 | 能力 | 状态 |
 |---|---|
-| 点查 / 写入 / 删除 | ✅ 已实现（内存 + SST） |
+| 点查 / 写入 / 删除 | ✅ 已实现 |
 | 范围扫描 | ✅ 已实现（左闭右开，多路归并） |
 | SSTable 读写（前缀压缩 + restart point） | ✅ 已实现 |
 | 索引 / Bloom filter / footer | ✅ 已实现 |
-| WAL 崩溃恢复 | 设计中（Week 2） |
-| 分层 compaction | 设计中（Week 2） |
-| 持久化（进程重启不丢） | 未实现 —— 这是当前最大的缺口 |
 | 内存有序表 | ✅ 已实现（有序数组，Week 3 视性能换跳表） |
+| WAL 崩溃恢复（尾部截断不 panic） | ✅ 已实现 |
+| 持久化（进程重启 / `kill -9` 不丢已 ack 数据） | ✅ 已实现 |
+| MANIFEST 版本快照 + CURRENT 原子切换 | ✅ 已实现 |
+| 分层 compaction（L0 → L1 → L2，墓碑只在最底层丢弃） | ✅ 已实现 |
+| 组提交（`putmany` 一批一次 fsync） | ✅ 已实现 |
+| 并发读写 | 未实现（单线程，无锁） |
+| 后台 compaction 线程 | 未实现（在 `flush` 末尾同步执行） |
+| 孤儿 SST 回收 | 未实现 |
 
 ### 明确不做
 
