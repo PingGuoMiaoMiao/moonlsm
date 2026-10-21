@@ -179,14 +179,29 @@ entry_1:  ...
 
 ### 3.4 index block
 
-```
-| last_key(varint32 len + bytes) | offset(varint64) | size(varint64) |
-| ...                                                              |
-```
+index block **就是一个 §3.2 编码的 data block**，不另立格式。每条的含义：
 
-每行对应一个 data block，`last_key` 是该 block 的最大 key。查找时找**第一个 `last_key >= 目标 key`** 的块。
+| 字段 | 含义 |
+|---|---|
+| `key` | 该 data block 的**最大 key**（`last_key`） |
+| `value` | `offset(varint64) + size(varint64)`，即该 data block 在文件中的位置与长度 |
+| `type` | 恒为 `0x00`。索引条目不是键值数据，不存在墓碑 |
+| `seq` | 恒为 `0UL`。索引条目不带版本 |
 
-index block 本身也用 §3.2 的前缀压缩编码，读出来后整体驻留内存（一个 SST 的索引通常几百字节到几 KB）。
+查找时找**第一个 `key >= 目标 key`** 的条目，它指向的 block 就是可能包含目标的那一块。
+注意这是 `seek`（下界）语义，不是 `get`（精确匹配）语义。
+
+**为什么复用而不是另立格式**：多一个格式就多一个编码器、一个解码器、一套往返测试、
+一类「两处编码不一致」的 bug。代价是每条多 2 字节（`type` + `seq`）。
+索引条目数 = data block 数（4 KiB 一块，100 万条数据大约 1 万个块），
+2 字节 × 1 万 = 20 KB，相对于 SST 本身（几十 MB）可以忽略。
+**用 20 KB 换掉一整类 bug，划算。**
+
+> 顺带解释了为什么 §3.2 的 `type` 必须是独立的字节，而不能用「`value` 长度为 0」表示删除：
+> 如果靠长度推断语义，索引条目（`value` 是 8–16 字节的 handle）与数据条目
+> 就没法共用同一个解码器了。
+
+读出来后整体驻留内存（一个 SST 的索引通常几百字节到几 KB）。
 
 ### 3.5 footer（固定 48 字节）
 
@@ -304,23 +319,38 @@ SST 元信息本身很小（1 万个 SST 也才 400 KB），而 compaction 触�
 |---|---|---|
 | WAL 帧 + 恢复截断 | ⬜ 未实现 | — |
 | data block 前缀压缩 | ✅ 完成 | `block.mbt` |
-| index block | ⬜ 未实现 | — |
-| filter block（bloom 已有，编码未写） | 🟡 部分 | `bloom.mbt` |
-| footer | ⬜ 未实现 | — |
+| index block | ✅ 完成 | `sstable.mbt` |
+| filter block | ✅ 完成 | `bloom.mbt`（`encode` / `decode_bloom`） |
+| footer | ✅ 完成 | `sstable.mbt` |
 | MANIFEST + CURRENT 原子切换 | ⬜ 未实现 | — |
 
 图例：✅ 完成 / 🟡 部分 / ⬜ 未实现
 
-`data block` 的完成标准（不只是「能编能解」）：
+### data block 的完成标准
 
 - [x] 编码字节与本文档 §3.2 逐字节一致（`block_wbtest.mbt` 的「黄金向量」测试）
 - [x] 1000 条递增 key 往返逐条一致
 - [x] restart 间隔为 16，restart 数组位置与计数正确
 - [x] 前缀压缩确实生效（同长度随机 key 对比，体积至少小 15%）
 - [x] `get` 二分查找命中全部 key，越界/不存在返回 `None`
+- [x] `seek` 下界语义正确（index 查找依赖它）
 - [x] 墓碑与空 value 可区分
 - [x] 乱序/重复 key 直接报错，不写出坏 block
 - [x] 结构损坏返回 `None`，不 panic
+
+### SST 的完成标准
+
+- [x] 写 1 万条后逐条读回一致（`sstable_wbtest.mbt`）
+- [x] 1 万条切出多个 data block（否则跨块路径根本没被测到）
+- [x] 大 value（64 KiB）不被硬切，往返正确
+- [x] footer 各区域首尾相接、无缝隙无重叠
+- [x] bloom 无假阴性（所有写过的 key 逐个验证）
+- [x] 坏文件（短、magic 错、version 不支持、截断）一律返回 `None`
+- [x] 墓碑写盘后仍可区分
+
+实测规模（1 万条 `key:%06d -> value:<i>`）：SST 187 KB，44 个 data block，
+filter 12.5 KB，index 613 B，平均每条 19 字节。前缀压缩把 key 部分的
+6 字节公共前缀压掉了，这是 SST 总字节小于原始 KV 字节的原因。
 
 ---
 
@@ -330,9 +360,11 @@ SST 元信息本身很小（1 万个 SST 也才 400 KB），而 compaction 触�
 WAL 帧:    [crc32c:4][len:varint32][type:1][payload:len]
 payload:   [seq:varint64][op:1][key:varint32+bytes][value:varint32+bytes]
 SST:       data* | filter | index | footer(48)
-data entry:[type:1][shared:v32][non_shared:v32][value_len:v32][key_delta][value]
+data entry:[type:1][seq:v64][shared:v32][non_shared:v32][value_len:v32][key_delta][value]
            type: 0x00=值  0x01=墓碑
-SST:       data* | filter | index | footer(48)
+index 条目: 与 data entry 同格式；key = 该块 last_key
+           value = offset(v64) + size(v64)；type 恒 0x00，seq 恒 0
+filter:    k:1 num_bits:v32 bits[ceil(num_bits/8)]
 footer:    filter_off:8 filter_sz:8 index_off:8 index_sz:8 min_seq:8 ver:4 "MSST":4
 MANIFEST:  "MMAN":4 ver:2 rsvd:2 last_seq:v64 log_num:v64 next_num:v64
            num_levels:v32 [count:v32 [num:v64 size:v64 smallest:str largest:str]*]*

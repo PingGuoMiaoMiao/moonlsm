@@ -49,3 +49,63 @@ pub fn BloomFilter::may_contain(self : BloomFilter, key : Bytes) -> Bool {
   }
   true
 }
+
+///|
+/// 编码成格式规范 §3.3 的字节布局：
+/// `k(1B) | num_bits(varint32) | bits[ceil(num_bits/8)]`
+///
+/// 位图按位打包（低位在前），而不是一个 bool 一字节 ——
+/// 后者会让 filter 膨胀 8 倍，直接吃掉 bloom 的全部收益。
+pub fn BloomFilter::encode(self : BloomFilter) -> Bytes {
+  let out = Buffer::Buffer()
+  out.write_byte(self.k.to_byte())
+  let nbits = self.bits.length()
+  write_varint32(out, nbits)
+  let nbytes = (nbits + 7) / 8
+  for i in 0..<nbytes {
+    let mut b = 0
+    for j in 0..<8 {
+      let idx = i * 8 + j
+      if idx < nbits && self.bits[idx] {
+        b = b | (1 << j)
+      }
+    }
+    out.write_byte(b.to_byte())
+  }
+  out.to_bytes()
+}
+
+///|
+/// 从字节解码 filter。结构不一致时返回 `None`。
+///
+/// 这里**校验得比较严**（k 的范围、位图长度必须与 num_bits 精确匹配）：
+/// filter 读错不会直接导致数据错误，但会让「假阴性」出现 ——
+/// 而假阴性意味着「数据明明在，却查不到」，这是 LSM 里最不可接受的错误。
+/// 宁可判定文件损坏、拒绝打开，也不要拿着一个半信半疑的 filter 去过滤。
+pub fn decode_bloom(data : Bytes) -> BloomFilter? {
+  if data.length() < 2 {
+    return None
+  }
+  let k = data[0].to_int()
+  if k < 1 || k > 30 {
+    return None
+  }
+  let (nbits, body_start) = match read_varint32(data, 1, data.length()) {
+    Some(pair) => pair
+    None => return None
+  }
+  // 上限 1 << 24 位 = 2 MiB 位图，足够 130 万 key，超过这个数说明数据坏了
+  if nbits < 1 || nbits > 1 << 24 {
+    return None
+  }
+  let nbytes = (nbits + 7) / 8
+  if body_start + nbytes != data.length() {
+    return None
+  }
+  let bits = Array::make(nbits, false)
+  for i in 0..<nbits {
+    let byte = data[body_start + i / 8].to_int()
+    bits[i] = (byte & (1 << (i % 8))) != 0
+  }
+  Some({ bits, k, })
+}

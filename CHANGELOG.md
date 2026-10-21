@@ -30,11 +30,31 @@
   - 结构损坏返回 `None` 而不是 panic；乱序/重复 key 直接抛 `Corruption`
   - 前缀压缩实测：1000 条共享前缀的 11 字节 key，体积比同长度随机 key 小 15% 以上
 
+**SSTable（Week 1 D3）**
+
+- `sstable.mbt`：`data block* | filter block | index block | footer(48)` 的写与读
+  - `SstWriter`：按 key 升序追加，块满 4 KiB 自动封盘并在索引里记
+    `last_key -> (offset, size)`；`finish()` 生成 filter、index、footer
+  - `SstReader`：`open_sst` 校验长度 → magic → version → 区域边界，
+    任一失败返回 `None`；`get` 走 bloom 否定 → index seek → block 二分
+  - **只处理 `Bytes`，不碰文件系统**。核心保持 backend 无关，
+    CI 在 wasm-gc / js 上编译它即可证明；文件 IO 留给边界层
+- `bloom.mbt`：补 `encode` / `decode_bloom`，实现 §3.3 的位图编码
+  （按位打包，不是一个 bool 一字节 —— 后者会让 filter 膨胀 8 倍）
+- `block.mbt`：新增 `seek`（下界查找，index 依赖它）与 `last_key` 访问器
+  - 二分逻辑抽成 `restart_index_for`，`get` 与 `seek` 共用。
+    写两份的话，某天只改其中一份就会得到「精确查找对、下界查找错」
+
 **测试**
 
 - `varint_wbtest.mbt`：7 条，含**逐字节黄金向量**（不只是往返）
 - `block_wbtest.mbt`：12 条，含完整 block 的黄金向量、1000 条随机 key 往返、
   restart 结构、二分查找边界、墓碑语义、乱序拒绝、结构损坏
+- `sstable_wbtest.mbt`：10 条，含 1 万条写回、跨 block、64 KiB 大 value、
+  bloom 无假阴性、坏文件不 panic、footer 区域首尾相接
+
+实测（1 万条 `key:%06d -> value:<i>`）：SST 187 KB / 44 个 data block /
+filter 12.5 KB / index 613 B / 平均每条 19 字节。
 
 ### 变更
 
@@ -56,9 +76,13 @@
 
 ### 计划中（v0.2.0 · Week 1 剩余）
 
-- `sstable.mbt`：写 / 读 SST，含 index block 与 footer
 - `iter.mbt`：memtable + 单 SST 的归并迭代
 - `db.mbt`：串起 put / get / delete / scan 的最简路径（无 WAL、无 compaction）
+
+### 已知技术债
+
+- `SstWriter` 把所有 key 留在内存里建 bloom（需要预先知道元素个数）。
+  1 万条约 100 KB，可以接受；到百万级要改成两遍写或可增长的 bloom
 
 ---
 

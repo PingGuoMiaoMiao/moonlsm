@@ -74,6 +74,13 @@ pub fn BlockBuilder::entry_count(self : BlockBuilder) -> Int {
 }
 
 ///|
+/// 最后一条的 key（也就是这个 block 的最大 key）。
+/// SST 写索引时需要它作为 `last_key`；空 block 返回空 key。
+pub fn BlockBuilder::last_key(self : BlockBuilder) -> Bytes {
+  self.last_key
+}
+
+///|
 /// 是否一条都没写。
 pub fn BlockBuilder::is_empty(self : BlockBuilder) -> Bool {
   self.count == 0
@@ -314,14 +321,12 @@ fn Block::restart_first_key(self : Block, idx : Int) -> Bytes? {
 }
 
 ///|
-/// 按 key 精确查找。
+/// 二分定位：返回「最后一个首 key ≤ target」的 restart 点下标。
 ///
-/// 两步：先在 restart 数组上二分（找最后一个首 key ≤ 目标的 restart 点），
-/// 再从那里线性扫到下一个 restart 点。最坏解 16 条 entry。
-///
-/// 返回墓碑条目（`deleted = true`）时**不要当命中处理**——
-/// 调用方必须看 `deleted` 字段，否则删除会失效。
-pub fn Block::get(self : Block, key : Bytes) -> Entry? {
+/// `get` 与 `seek` 共用这一段。**故意抽出来**：这是整个 block 里
+/// 唯一一处二分逻辑，写两份的话，某天只改了其中一份就会得到
+/// 「精确查找对、下界查找错」这种极难发现的偏差。
+fn Block::restart_index_for(self : Block, target : Bytes) -> Int? {
   let n = self.restarts.length()
   if n == 0 {
     return None
@@ -334,13 +339,29 @@ pub fn Block::get(self : Block, key : Bytes) -> Entry? {
       Some(k) => k
       None => return None
     }
-    if compare_bytes(mid_key, key) <= 0 {
+    if compare_bytes(mid_key, target) <= 0 {
       lo = mid
     } else {
       hi = mid - 1
     }
   }
-  let mut pos = self.restarts[lo]
+  Some(lo)
+}
+
+///|
+/// 按 key 精确查找。
+///
+/// 两步：先在 restart 数组上二分（找最后一个首 key ≤ 目标的 restart 点），
+/// 再从那里线性扫到下一个 restart 点。最坏解 16 条 entry。
+///
+/// 返回墓碑条目（`deleted = true`）时**不要当命中处理**——
+/// 调用方必须看 `deleted` 字段，否则删除会失效。
+pub fn Block::get(self : Block, key : Bytes) -> Entry? {
+  let start = match self.restart_index_for(key) {
+    Some(i) => i
+    None => return None
+  }
+  let mut pos = self.restarts[start]
   let mut prev : Bytes = b""
   while pos < self.limit {
     let e = match self.read_entry_at(pos, prev) {
@@ -359,6 +380,41 @@ pub fn Block::get(self : Block, key : Bytes) -> Entry? {
     if c > 0 {
       // key 已经越过目标，后面只会更大
       return None
+    }
+    prev = e.key
+    pos = e.next
+  }
+  None
+}
+
+///|
+/// 下界查找：返回第一个 `key >= target` 的条目。
+///
+/// 这是 index block 需要的语义 —— 索引里存的是每个 data block 的
+/// **最大 key**，找「第一个 ≥ 目标的 last_key」就等于找到「可能包含目标的块」。
+/// 也用于 scan 的起始定位。
+///
+/// 与 `get` 的区别只在终点判断：`get` 遇到更大的 key 就返回 `None`，
+/// `seek` 则把它返回出去。
+pub fn Block::seek(self : Block, target : Bytes) -> Entry? {
+  let start = match self.restart_index_for(target) {
+    Some(i) => i
+    None => return None
+  }
+  let mut pos = self.restarts[start]
+  let mut prev : Bytes = b""
+  while pos < self.limit {
+    let e = match self.read_entry_at(pos, prev) {
+      Some(e) => e
+      None => return None
+    }
+    if compare_bytes(e.key, target) >= 0 {
+      return Some({
+        key: e.key,
+        value: e.value,
+        seq: e.seq,
+        deleted: e.deleted,
+      })
     }
     prev = e.key
     pos = e.next

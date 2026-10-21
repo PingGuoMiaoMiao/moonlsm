@@ -51,6 +51,14 @@ pub fn write_fixed32(buf : Buffer, value : Int) -> Unit {
 }
 
 ///|
+/// 写 8 字节小端定长整数。footer 的 offset / size / seq 都用它。
+pub fn write_fixed64(buf : Buffer, value : UInt64) -> Unit {
+  for i in 0..<8 {
+    buf.write_byte(((value >> (i * 8)) & 0xFFUL).to_int().to_byte())
+  }
+}
+
+///|
 /// `varint32` 编码后的字节数。用于估算 block 大小，不做实际写入。
 pub fn varint32_len(value : Int) -> Int {
   let mut n = 1
@@ -109,6 +117,19 @@ pub fn read_varint64(data : Bytes, pos : Int, limit : Int) -> (UInt64, Int)? {
     shift = shift + 7
   }
   None
+}
+
+///|
+/// 从 `data[pos..]` 读 8 字节小端定长整数。
+pub fn read_fixed64(data : Bytes, pos : Int) -> UInt64? {
+  if pos < 0 || pos + 8 > data.length() {
+    return None
+  }
+  let mut v = 0UL
+  for i in 0..<8 {
+    v = v | (data[pos + i].to_uint64() << (i * 8))
+  }
+  Some(v)
 }
 
 ///|
