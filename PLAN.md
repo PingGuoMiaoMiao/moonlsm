@@ -216,15 +216,21 @@ CLI 手工驱动验证过「flush → 删除 → 再 flush → 读不到」这�
 
 对应 mini-lsm Week 2。**目标：kill -9 不丢已确认数据，数据量涨了能自动合并。**
 
-| 天 | 任务 | 验收 |
-|---|---|---|
-| D1 | `wal.mbt`：长度前缀 + CRC32 的记录格式 | 单条写入后重启能重放 |
-| D2 | `wal.mbt`：恢复时截断不完整尾部 | 手动 truncate 后能正常启动 |
-| D3 | `manifest.mbt`：记录每层有哪些 SST，原子切换 | 重启后层信息正确 |
-| D4 | `compaction.mbt`：L0 → L1 的简单合并 | 合并后数据不丢、墓碑保留 |
-| D5 | `compaction.mbt`：分层触发条件 + 后台执行 | 写 100 万条不爆内存 |
-| D6 | 墓碑只在最底层丢弃 | 「删除后重写」用例通过 |
-| D7 | 全链路联调 | `crash_test.py --rounds 5` 全绿 |
+| 天 | 任务 | 验收 | 状态 |
+|---|---|---|---|
+| D1 | `crc32c.mbt` + `wal.mbt`：帧格式、恢复截断 | 任意位置截断都不 panic、只丢尾部 | ✅ |
+| D2 | `storage.mbt` + `fs_native.mbt`：存储后端抽象与真落盘 | 断电语义在 `moon test` 里可断言 | ✅ |
+| D3 | `manifest.mbt`：记录每层有哪些 SST，原子切换 | 重启后层信息正确 | ⬜ |
+| D4 | `db.mbt` 接入 `Storage`：WAL / SST 真落盘 | 进程重启数据还在 | ⬜ |
+| D5 | `compaction.mbt`：L0 → L1 的简单合并 | 合并后数据不丢、墓碑保留 | ⬜ |
+| D6 | 分层触发条件 + 墓碑只在最底层丢弃 | 「删除后重写」用例通过 | ⬜ |
+| D7 | 全链路联调 | `crash_test.py --rounds 5` 全绿 | ⬜ |
+
+D2 是计划外插进来的，但它其实**必须先做**：ADR-0003 承诺了 C1「已确认的写入必不丢」，
+而 `kill -9` 根本测不出「忘了 fsync」（进程被杀时 OS 页缓存还在）。
+没有 `MemStorage` 的双影子模型，C1 在 CI 里没有任何证据。
+同时它把三个平台差异（`fsync`/`_commit`、`rename`/`MoveFileExA`、
+返回值约定相反）一次性收进了一个文件。详见 `docs/adr/0004-storage-abstraction.md`。
 
 **Week 2 结束时的状态**：功能完整，可以开始录 demo 了。
 

@@ -11,6 +11,9 @@ target
 benches/python/data/
 benches/python/probe-data/
 
+# 单元测试里的真文件系统用例（storage_wbtest / fs_native_wbtest）
+.moonlsm_test/
+
 # Python
 __pycache__/
 *.pyc

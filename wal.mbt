@@ -62,7 +62,7 @@ pub fn WalWriter::new() -> WalWriter {
   write_fixed16(b, WAL_VERSION)
   // reserved 全 0
   write_fixed16(b, 0)
-  { out: b }
+  { out: b, }
 }
 
 ///|
@@ -176,7 +176,7 @@ fn decode_payload(data : Bytes, start : Int, len : Int) -> WalRecord? {
   if klen < 0 || p + klen > end {
     return None
   }
-  let key = data[p : p + klen].to_owned()
+  let key = data[p:p + klen].to_owned()
   p = p + klen
   if op_byte == OP_PUT {
     let (vlen, p3) = match read_varint32(data, p, end) {
@@ -187,7 +187,7 @@ fn decode_payload(data : Bytes, start : Int, len : Int) -> WalRecord? {
     if vlen < 0 || p + vlen > end {
       return None
     }
-    let value = data[p : p + vlen].to_owned()
+    let value = data[p:p + vlen].to_owned()
     p = p + vlen
     // payload 必须**正好**用完：多出字节说明声明长度和内容不一致
     if p != end {
@@ -214,18 +214,19 @@ pub fn recover_wal(data : Bytes) -> WalReplay {
   let n = data.length()
   if n < WAL_HEADER_SIZE {
     // 连文件头都没写全：不是 WAL，但也不必报错（可能是崩溃在初始化阶段）
-    return { records, good_bytes: 0, truncated: n > 0, header_ok: false }
+    return { records, good_bytes: 0, truncated: n > 0, header_ok: false, }
   }
   if !bytes_match(data, 0, WAL_MAGIC) {
-    return { records, good_bytes: 0, truncated: false, header_ok: false }
+    return { records, good_bytes: 0, truncated: false, header_ok: false, }
   }
   let version = match read_fixed16(data, 4) {
     Some(v) => v
-    None => return { records, good_bytes: 0, truncated: false, header_ok: false }
+    None =>
+      return { records, good_bytes: 0, truncated: false, header_ok: false, }
   }
   if version != WAL_VERSION {
     // 不认识的版本：拒绝重放，但也不猜。上层据此拒绝打开（§5.2）
-    return { records, good_bytes: 0, truncated: false, header_ok: false }
+    return { records, good_bytes: 0, truncated: false, header_ok: false, }
   }
   let mut pos = WAL_HEADER_SIZE
   let mut good = pos
@@ -254,7 +255,7 @@ pub fn recover_wal(data : Bytes) -> WalReplay {
     if data[p].to_int() != FRAME_FULL {
       break
     }
-    let body = data[p : p + 1 + payload_len]
+    let body = data[p:p + 1 + payload_len]
     if crc32c(body.to_owned()) != crc {
       // CRC 不匹配一律视为尾部损坏，不报错、不 panic（ADR-0003）
       break
@@ -267,7 +268,7 @@ pub fn recover_wal(data : Bytes) -> WalReplay {
     pos = p + 1 + payload_len
     good = pos
   }
-  { records, good_bytes: good, truncated: good < n, header_ok: true }
+  { records, good_bytes: good, truncated: good < n, header_ok: true, }
 }
 
 ///|

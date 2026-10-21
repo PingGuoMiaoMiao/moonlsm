@@ -1,3 +1,17 @@
 import {
   "moonbitlang/core/encoding/utf8",
 }
+
+// fs_native.mbt 里全是 `extern "C"` 到 libc 的声明（fopen / fsync / mkdir）。
+// wasm-gc 与 js 后端没有 libc，链接会直接失败，所以按后端排除掉。
+// 测试文件同理：它引用了只存在于 native 的 `NativeStorage`。
+//
+// 注意这是**后端**维度（target），不是**操作系统**维度。
+// OS 维度由文件内部的 `#cfg(platform = "windows")` 处理。
+
+options(
+  targets: {
+    "fs_native.mbt": [ "native" ],
+    "fs_native_wbtest.mbt": [ "native" ],
+  },
+)

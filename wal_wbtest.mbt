@@ -9,7 +9,12 @@
 fn wal_with(n : Int) -> Bytes {
   let w = WalWriter::new()
   for i in 0..<n {
-    w.append(WalRecord::new((i + 1).to_uint64(), Op::Put(kb("k" + pad6(i)), kb("v" + i.to_string()))))
+    w.append(
+      WalRecord::new(
+        (i + 1).to_uint64(),
+        Op::Put(kb("k" + pad6(i)), kb("v" + i.to_string())),
+      ),
+    )
   }
   w.to_bytes()
 }
@@ -18,7 +23,10 @@ fn wal_with(n : Int) -> Bytes {
 test "wal: 文件头字节符合规范" {
   let raw = WalWriter::new().to_bytes()
   assert_eq(raw.length(), WAL_HEADER_SIZE)
-  assert_bytes_eq(raw, bytes_of([0x4D, 0x57, 0x41, 0x4C, 0x01, 0x00, 0x00, 0x00]))
+  assert_bytes_eq(
+    raw,
+    bytes_of([0x4D, 0x57, 0x41, 0x4C, 0x01, 0x00, 0x00, 0x00]),
+  )
 }
 
 ///|
@@ -30,21 +38,21 @@ test "wal: 帧字节逐字节符合规范（黄金向量）" {
     // 文件头 "MWAL" + version 1 + reserved 0
     0x4D, 0x57, 0x41, 0x4C, 0x01, 0x00, 0x00, 0x00,
     // 帧 1: crc32c(type+payload) 小端
-    0x72, 0x3C, 0x02, 0xB3,
+     0x72, 0x3C, 0x02, 0xB3,
     //       length=6 (不含 type)
-    0x06,
+     0x06,
     //       type=0x01(完整记录)
-    0x01,
+     0x01,
     //       payload: seq=1 op=0x00(Put) klen=1 'a' vlen=1 '1'
-    0x01, 0x00, 0x01, 0x61, 0x01, 0x31,
+     0x01, 0x00, 0x01, 0x61, 0x01, 0x31,
     // 帧 2: crc
-    0x70, 0x20, 0x4A, 0xE7,
+     0x70, 0x20, 0x4A, 0xE7,
     //       length=4
-    0x04,
+     0x04,
     //       type=0x01
-    0x01,
+     0x01,
     //       payload: seq=2 op=0x01(Delete) klen=1 'a' —— 没有 value 段
-    0x02, 0x01, 0x01, 0x61,
+     0x02, 0x01, 0x01, 0x61,
   ])
   assert_bytes_eq(w.to_bytes(), want)
 }
@@ -99,7 +107,7 @@ test "wal: 任意位置截断都不 panic，且只丢尾部" {
   // 这是 WAL 最重要的一条性质：断电可能发生在**任意字节**上。
   // 逐字节砍一遍，是唯一能覆盖「所有可能的断电时刻」的办法。
   let full = wal_with(5)
-  for cut in 0..=full.length() {
+  for cut in 0..<=full.length() {
     let part = full[:cut].to_owned()
     let rep = recover_wal(part)
     // 不 panic 是隐含的（能跑到这里就说明没炸），这里断言的是语义：
@@ -127,11 +135,7 @@ test "wal: 中间帧 CRC 被改坏，只恢复到它之前" {
   // 翻转偏移 16 的字节，落在第一帧 payload 里 —— CRC 必然对不上。
   let flipped = Buffer::Buffer()
   for i in 0..<full.length() {
-    let v = if i == 16 {
-      full[i].to_int() ^ 0xFF
-    } else {
-      full[i].to_int()
-    }
+    let v = if i == 16 { full[i].to_int() ^ 0xFF } else { full[i].to_int() }
     flipped.write_byte(v.to_byte())
   }
   let rep = recover_wal(flipped.to_bytes())
@@ -192,7 +196,12 @@ test "wal: 空文件与只有文件头的文件" {
 test "wal: replay_into 只应用 seq 大于 min_seq 的记录" {
   let w = WalWriter::new()
   for i in 0..<10 {
-    w.append(WalRecord::new((i + 1).to_uint64(), Op::Put(kb("k" + i.to_string()), kb("v"))))
+    w.append(
+      WalRecord::new(
+        (i + 1).to_uint64(),
+        Op::Put(kb("k" + i.to_string()), kb("v")),
+      ),
+    )
   }
   let rep = recover_wal(w.to_bytes())
   assert_eq(rep.len(), 10)

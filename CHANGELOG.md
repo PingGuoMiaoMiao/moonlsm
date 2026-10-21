@@ -76,6 +76,24 @@
 filter 12.5 KB / index 613 B / 平均每条 19 字节。
 `model_check.py` 2000 步 × seed 1/7/11 全部零错误。
 
+**存储后端抽象（Week 2 D2）**
+
+- `storage.mbt`：`Storage` trait + `MemStorage`
+  - 引擎只依赖 trait，不直接碰任何 IO 原语。这不是「可插拔」的架构洁癖，
+    而是为了让崩溃契约可测：`MemStorage` 维护「当前视图」与「已落盘」两份影子，
+    `power_loss()` 回滚到后者，于是「已 fsync 的写入必不丢」变成一条
+    **确定性的、进程内的、三个后端都能跑**的断言
+  - `append_file` 与 `sync_file` 刻意分开：合成一个会锁死
+    「写 N 条、sync 1 次」这个 WAL 最重要的性能手段
+  - 故障注入：`set_fail_sync` / `set_fail_write` / `plant`
+- `fs_native.mbt`：`NativeStorage`，真文件系统（仅 native 后端）
+  - `fopen` / `fwrite` / `fflush` / `fsync` / `rename` / `remove` / `mkdir` / 目录列举
+  - 平台差异全部用 `#cfg(platform = "windows")` 收在本文件内，
+    核心逻辑一行平台判断都没有
+  - 64 位定位（`_fseeki64` / `fseeko`）：Windows 的 `long` 是 32 位，
+    `fseek` 只能到 2 GiB
+- `docs/adr/0004-storage-abstraction.md`：决策记录，含三个平台坑的实测结论
+
 ### 变更
 
 - `model_check.py` 现在会先探测引擎是否支持持久化，不支持时**自动关闭重启测试**
@@ -97,13 +115,26 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
   `prev_key[:shared]`：`aab` 被解成 `aaab`，且 `get` 全部落空。
   被 1000 条往返测试抓到
 
-### 计划中（v0.2.0 · Week 2）
+三个**跨平台语义**问题，都是真跑起来才暴露的（详见 ADR-0004）：
 
-- `wal.mbt`：§2 的帧格式 + CRC32C + 恢复时截断尾部坏帧
+- **`rename` 的返回值约定在 Windows 上是反的**。POSIX `rename` 返回 0 表示成功，
+  Windows `MoveFileExA` 返回**非 0** 表示成功。最初直接透传返回值，
+  症状是「改名成功时报错、失败时静默通过」—— CURRENT 切换会在 Windows 上彻底失效
+- **Windows 的 `rename` 不能覆盖已存在文件**（POSIX 是原子覆盖）。
+  CURRENT 每次切换都是「新名字覆盖旧名字」，用 `rename` 的话第二次 flush
+  之后数据库就再也启动不了。改用 `MoveFileExA` + `MOVEFILE_REPLACE_EXISTING`，
+  并加 `MOVEFILE_WRITE_THROUGH` 顺便解决持久性
+- **`moonbit_read_dir_ffi` 返回 `FixedArray` 而不是 `Array`**。声明成 `Array[Bytes]`
+  时，空目录能过、非空目录**直接段错误**（`0xc0000005`）
+- `NativeStorage::prepare` 第一版只 `mkdir` 一次，而 `mkdir` 不建父目录，
+  测试目录 `.moonlsm_test/rw` 拿到 `ENOENT`。改为逐级创建
+
+### 计划中（v0.2.0 · Week 2 剩余）
+
 - `manifest.mbt`：§4 的全量快照 + CURRENT 原子 rename
-- `fs.mbt`：边界层的文件读写与 fsync（核心仍只处理 Bytes）
+- `db.mbt` 接入 `Storage`：WAL 真落盘、SST 真落盘、`open(path)` / `close()`
 - `compact.mbt`：L0 → L1 的归并 compaction，输出后清理输入
-- `db.mbt` 接入 `open(path)` / `close()`，进程重启不丢数据
+- 崩溃测试从 `MemStorage` 的进程内断电，扩展到真进程 + `kill -9`（L2）
 
 ### 已知技术债
 
@@ -113,6 +144,11 @@ filter 12.5 KB / index 613 B / 平均每条 19 字节。
   小规模正确且简单，但读放大会随 SST 变大线性增长。
   改成惰性的 block 级迭代器是 v1.1 的事（接口不变）
 - 没有 compaction，SST 数量只增不减，读路径的 SST 扫描是 O(文件数)
+- `NativeStorage` 每次文件操作都 `fopen` / `fclose`，不保持常开句柄。
+  语义正确但压测时会明显慢；优化点是引入带缓冲的句柄表（M3 之后）
+- `list_files` 依赖运行时的 `moonbit_read_dir_ffi`，它在 `opendir` 失败时
+  返回 `NULL`，到了 MoonBit 侧就是一个空指针的 `FixedArray`——访问会段错误。
+  目前靠「先 `prepare()` 保证目录存在」规避，长期应该换掉
 
 ---
 
