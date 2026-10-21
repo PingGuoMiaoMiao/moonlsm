@@ -26,13 +26,16 @@ import sys
 import threading
 import time
 
+import dbcli_launch
+
 
 class Client:
-    def __init__(self, cmd):
+    def __init__(self, cmd, env=None):
         self.cmd = cmd
         self.proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1,
+            env=env,
         )
         self.q = queue.Queue()
 
@@ -92,14 +95,20 @@ def main():
     ap.add_argument("--value-size", type=int, default=100)
     ap.add_argument("--reads", type=int, default=20000)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--sync", action="store_true",
+                    help="写入时等 fsync 返回（真实持久化路径，慢一个数量级）")
     args = ap.parse_args()
 
     rng = random.Random(args.seed)
-    data_dir = os.path.abspath(args.data_dir)
+    # 数据目录必须和 dbcli 用的是同一个。之前这里直接 rmtree("./data")，
+    # 而 dbcli 落回默认的 .moonlsm_data —— 于是「空间放大」测的是一个空目录，
+    # 报出来的 0.00x 看起来漂亮得不像话。
+    data_dir = dbcli_launch.resolve_dir(args.data_dir, "./data")
     shutil.rmtree(data_dir, ignore_errors=True)
     os.makedirs(data_dir, exist_ok=True)
+    print("数据目录: %s | sync=%s" % (data_dir, args.sync))
 
-    cli = Client(shlex.split(args.cmd))
+    cli = Client(shlex.split(args.cmd), dbcli_launch.child_env(data_dir))
     payload_bytes = 0
 
     # ---- 1. 顺序写 ----
@@ -112,7 +121,7 @@ def main():
             v = k + "|" + ("v" * args.value_size)
             items.append([k, v])
             payload_bytes += len(k) + len(v)
-        cli.call({"op": "putmany", "items": items, "sync": False})
+        cli.call({"op": "putmany", "items": items, "sync": args.sync})
     cli.call({"op": "flush"})
     seq_secs = time.perf_counter() - t0
     seq_tp = args.n / seq_secs
@@ -128,7 +137,7 @@ def main():
             v = k + "|" + ("w" * args.value_size)
             items.append([k, v])
             payload_bytes += len(k) + len(v)
-        cli.call({"op": "putmany", "items": items, "sync": False})
+        cli.call({"op": "putmany", "items": items, "sync": args.sync})
     cli.call({"op": "flush"})
     rnd_secs = time.perf_counter() - t0
     rnd_tp = args.n / rnd_secs
@@ -166,12 +175,20 @@ def main():
     scan_secs = time.perf_counter() - t0
 
     # ---- 5. 空间放大 ----
+    #
+    # 分母必须是「逻辑数据量」，不是「写入总量」。
+    # 随机写那一轮把同一批 key 全写了一遍，写入总量翻倍，但磁盘上
+    # 只留最新版本 —— 用写入总量当分母会算出 0.5x 这种小于 1 的假数字，
+    # 看起来像「压缩了」，实际只是重复计数。
     cli.call({"op": "flush"})
     disk = dir_size(data_dir)
-    amp = disk / payload_bytes if payload_bytes else 0
+    logical = args.n * (len("key%010d" % 0) + len("key%010d" % 0) + 1 + args.value_size)
+    amp = disk / logical if logical else 0
 
     cli.stop()
 
+    print("\n写入模式: sync=%s | n=%d | batch=%d | value_size=%d"
+          % (args.sync, args.n, args.batch, args.value_size))
     print("\n| 指标 | 数值 |")
     print("|---|---|")
     print("| 顺序写吞吐 | %.0f ops/s (%.2f MB/s) |"
@@ -184,7 +201,9 @@ def main():
     print("| 读延迟 P50 (未命中) | %.3f ms |" % pct(miss_lat, 50))
     print("| 范围扫描 | %.0f rows/s |" % (rows / scan_secs if scan_secs else 0))
     print("| 磁盘占用 | %.1f MB |" % (disk / 1e6))
+    print("| 逻辑数据量 | %.1f MB |" % (logical / 1e6))
     print("| 空间放大 | %.2fx |" % amp)
+    print("| 写入总量（含覆盖） | %.1f MB |" % (payload_bytes / 1e6))
     print("\n提示：空间放大 > 2x 说明 compaction 没做干净；")
     print("      P99 远高于 P50 说明某个层级缺少 bloom filter 或索引。")
 
