@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>moonlsm · 90 秒演示提词器</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --line: #2a3038;
+    --fg: #e8eaed;
+    --dim: #8b949e;
+    --accent: #4fb3d9;
+    --warn: #e0a33e;
+    --over: #e05c5c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "Microsoft YaHei", "PingFang SC", "Source Han Sans SC", sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* 顶部状态条 */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 14px 26px 12px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    flex: 0 0 auto;
+  }
+  #clock {
+    font-family: "Cascadia Mono", Consolas, monospace;
+    font-size: 30px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 1px;
+    min-width: 150px;
+  }
+  #clock.over { color: var(--over); }
+  .meta { color: var(--dim); font-size: 13px; line-height: 1.5; }
+  .meta b { color: var(--fg); font-weight: 600; }
+  #bar-wrap {
+    flex: 1 1 auto;
+    height: 6px;
+    background: #22272e;
+    border-radius: 3px;
+    overflow: hidden;
+    position: relative;
+  }
+  #bar {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width .12s linear;
+  }
+  #seg-bar {
+    position: absolute;
+    top: 0; left: 0;
+    height: 100%;
+    width: 0%;
+    background: rgba(224, 163, 62, .55);
+    transition: width .12s linear;
+  }
+  #keys { color: var(--dim); font-size: 12px; white-space: nowrap; }
+
+  /* 主体：当前段大字 + 下一段暗字 */
+  main {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    padding: 22px 30px 10px;
+    overflow: hidden;
+  }
+  #now-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 8px;
+  }
+  #now-title { font-size: 26px; font-weight: 700; letter-spacing: .5px; }
+  #now-time { color: var(--accent); font-size: 16px; font-family: "Cascadia Mono", Consolas, monospace; }
+  #now-cue {
+    margin-left: auto;
+    font-size: 15px;
+    color: var(--bg);
+    background: var(--warn);
+    padding: 3px 10px;
+    border-radius: 3px;
+    font-weight: 700;
+  }
+  #now-cue.hidden { visibility: hidden; }
+  #lines { font-size: 27px; line-height: 1.62; }
+  #lines p { margin: 0 0 10px; }
+  #lines .k { color: var(--accent); font-weight: 700; }
+  #lines .q { color: var(--dim); font-size: 22px; }
+
+  #next {
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px dashed var(--line);
+    color: var(--dim);
+    font-size: 17px;
+    line-height: 1.5;
+    max-height: 22vh;
+    overflow: hidden;
+  }
+  #next .lbl { font-size: 12px; letter-spacing: 2px; text-transform: uppercase; }
+
+  /* 底部时间轴 */
+  footer {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 6px;
+    padding: 10px 26px 14px;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+  .chip {
+    flex: 1 1 0;
+    padding: 7px 8px;
+    border-radius: 4px;
+    background: #1d232b;
+    border: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--dim);
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    overflow: hidden;
+  }
+  .chip b { display: block; color: var(--fg); font-size: 12.5px; margin-bottom: 2px;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip.done { opacity: .45; }
+  .chip.cur { border-color: var(--accent); background: #1b2b33; }
+  .chip.cur b { color: var(--accent); }
+  .chip .t { font-family: "Cascadia Mono", Consolas, monospace; }
+</style>
+</head>
+<body>
+
+<header>
+  <div id="clock">00:00</div>
+  <div class="meta">
+    目标 <b>90 秒</b> · 当前段预算 <b id="budget">—</b><br>
+    按 <b>空格</b> 进下一段
+  </div>
+  <div id="bar-wrap"><div id="seg-bar"></div><div id="bar"></div></div>
+  <div id="keys">← 回退 · R 重置 · 点击下方格子跳转</div>
+</header>
+
+<main>
+  <div id="now-head">
+    <span id="now-title"></span>
+    <span id="now-time"></span>
+    <span id="now-cue" class="hidden">按回车</span>
+  </div>
+  <div id="lines"></div>
+  <div id="next"><div class="lbl">下一段</div><div id="next-body"></div></div>
+</main>
+
+<footer id="chips"></footer>
+
+<script>
+const SEGMENTS = [
+  {
+    t: 0, dur: 8, title: "开场",
+    cue: false,
+    lines: [
+      "moonlsm，一个用 MoonBit 写的嵌入式 LSM 存储引擎。",
+      "今天不演示功能列表，只演示一件事——<span class='k'>它怎么证明自己不丢数据</span>。"
+    ]
+  },
+  {
+    t: 8, dur: 20, title: "第 1 步 · 重启还在",
+    cue: true,
+    lines: [
+      "先写 1200 条。注意顺序：先追加 WAL、<span class='k'>fsync 成功之后才回 ack</span>，最后才改内存表。",
+      "这个顺序不能反——反了就会出现「读得到、但断电就没了」的脏读。",
+      "现在进程退出，重新打开。第一条 key 还在，值逐字节一致。",
+      "<span class='q'>中间这串是恢复路径：CURRENT → MANIFEST → 加载 SST → 重放 WAL。</span>"
+    ]
+  },
+  {
+    t: 28, dur: 26, title: "第 2 步 · 自动归并",
+    cue: true,
+    lines: [
+      "接着让它自己合并。看最左边这列：L0 从 1 数到 3，<span class='k'>第 4 个文件一到就触发归并</span>，L1 出现了。",
+      "再数到第 8 轮，L1 累计超过 1 MiB，整层沉到 L2。",
+      "一，归并完 <span class='k'>6000 条还是 6000 条</span>——只去重，不丢数据。",
+      "二，墓碑只在<span class='k'>最底层</span>才丢弃。提前扔了，上层还有旧版本，删掉的数据就会复活。"
+    ]
+  },
+  {
+    t: 54, dur: 16, title: "第 3 步 · kill -9",
+    cue: true,
+    lines: [
+      "现在是重点。1.5 秒内尽量多写，每一条都拿到了 ack。",
+      "然后在「一批正在落盘」的瞬间 <span class='k'>kill -9</span>——不是优雅退出，是直接杀，进程没有任何清理机会。",
+      "这就是断电的样子。"
+    ]
+  },
+  {
+    t: 70, dur: 14, title: "第 4 步 · 逐条校验",
+    cue: true,
+    lines: [
+      "重启，把刚才 ack 过的两万条<span class='k'>逐条读回来</span>。",
+      "丢失 0，值被破坏 0。",
+      "这就是契约 C1：已经承诺不丢的数据，一条都不能丢。"
+    ]
+  },
+  {
+    t: 84, dur: 6, title: "收尾（不要省）",
+    cue: false,
+    lines: [
+      "<span class='q'>最后诚实说一句：kill -9 只杀进程、不清操作系统的页缓存，所以它其实证明不了 fsync。</span>",
+      "<span class='q'>fsync 的正确性，是用 WAL 尾部截断注入验证的。</span>"
+    ]
+  }
+];
+const TOTAL = 90;
+
+let idx = 0;
+let startedAt = null;
+let segStartedAt = null;
+let timer = null;
+
+const $ = (id) => document.getElementById(id);
+
+function fmt(sec) {
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0");
+}
+
+function renderChips() {
+  $("chips").innerHTML = "";
+  SEGMENTS.forEach((sg, i) => {
+    const d = document.createElement("div");
+    d.className = "chip" + (i === idx ? " cur" : "") + (i < idx ? " done" : "");
+    d.innerHTML = "<b>" + sg.title + "</b><span class='t'>" + fmt(sg.t) +
+                  " · " + sg.dur + "s</span>";
+    d.onclick = () => goto(i);
+    $("chips").appendChild(d);
+  });
+}
+
+function render() {
+  const sg = SEGMENTS[idx];
+  $("now-title").textContent = sg.title;
+  $("now-time").textContent = fmt(sg.t) + " – " + fmt(sg.t + sg.dur);
+  $("budget").textContent = sg.dur + " 秒";
+  $("now-cue").className = sg.cue ? "" : "hidden";
+  $("lines").innerHTML = sg.lines.map((l) => "<p>" + l + "</p>").join("");
+
+  const nx = SEGMENTS[idx + 1];
+  $("next-body").innerHTML = nx
+    ? "<b style='color:#c9d1d9'>" + nx.title + "</b> · " + nx.lines[0]
+    : "演示结束。停两秒再停止录制，别让画面突然黑掉。";
+  renderChips();
+}
+
+function tick() {
+  if (startedAt === null) return;
+  const now = performance.now();
+  const el = (now - startedAt) / 1000;
+  const segEl = segStartedAt === null ? 0 : (now - segStartedAt) / 1000;
+  const sg = SEGMENTS[idx];
+
+  const c = $("clock");
+  c.textContent = fmt(el);
+  c.className = el > TOTAL ? "over" : "";
+
+  $("bar").style.width = Math.min(100, (el / TOTAL) * 100) + "%";
+  const sp = Math.min(100, (segEl / sg.dur) * 100);
+  const sb = $("seg-bar");
+  sb.style.width = sp + "%";
+  sb.style.background = segEl > sg.dur ? "rgba(224,92,92,.6)" : "rgba(224,163,62,.55)";
+}
+
+function startClockIfNeeded() {
+  if (startedAt === null) {
+    startedAt = performance.now();
+    segStartedAt = startedAt;
+    timer = setInterval(tick, 100);
+  }
+}
+
+function goto(i) {
+  idx = Math.max(0, Math.min(SEGMENTS.length - 1, i));
+  segStartedAt = performance.now();
+  render();
+  tick();
+}
+
+function next() {
+  startClockIfNeeded();
+  if (idx < SEGMENTS.length - 1) goto(idx + 1);
+}
+
+function prev() { goto(idx - 1); }
+
+function reset() {
+  if (timer) clearInterval(timer);
+  timer = null;
+  startedAt = null;
+  segStartedAt = null;
+  idx = 0;
+  $("clock").textContent = "00:00";
+  $("clock").className = "";
+  $("bar").style.width = "0%";
+  $("seg-bar").style.width = "0%";
+  render();
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.code === "Space" || e.code === "ArrowRight" || e.code === "Enter") {
+    e.preventDefault();
+    next();
+  } else if (e.code === "ArrowLeft" || e.code === "Backspace") {
+    e.preventDefault();
+    prev();
+  } else if (e.key === "r" || e.key === "R") {
+    reset();
+  }
+});
+
+// 支持 #3 这样的锚点直接跳到第 N 段，排练时不必从头按。
+const m = /^#(\d+)$/.exec(location.hash);
+if (m) {
+  const n = parseInt(m[1], 10);
+  if (n >= 1 && n <= SEGMENTS.length) idx = n - 1;
+}
+
+render();
+</script>
+</body>
+</html>
