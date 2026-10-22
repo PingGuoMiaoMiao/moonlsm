@@ -212,17 +212,17 @@ single corrupted byte in an SSTable, `Db::open` either succeeds or returns
 
 | Metric | Value |
 |---|---|
-| Sequential write | 50,212 ops/s (5.77 MB/s) |
-| Random write (overwrite) | 12,724 ops/s (1.46 MB/s) |
-| Read latency P50 / P95 / P99 | 0.068 / 0.113 / 0.147 ms |
-| Range scan (500 rows per call) | 32,895 rows/s |
+| Sequential write | 55,658 ops/s (6.40 MB/s) |
+| Random write (overwrite) | 12,699 ops/s (1.46 MB/s) |
+| Read latency P50 / P95 / P99 | 0.053 / 0.087 / 0.111 ms |
+| Range scan (500 rows per call) | 117,483 rows/s |
 | Space amplification | 1.13× |
 
 **Group commit is the number that matters here**: one fsync per 1,000 records means
-`sync:true` is only 9% slower than `sync:false` (46,316 vs 50,806 ops/s). Drop the
-batch size to 1 — one fsync per record — and sequential write falls from 3,103 to
-**79** ops/s, a 39× collapse. SQLite under the same workload goes from 34,426 to
-497 ops/s, the same order of magnitude, which says this is the physical cost of
+`sync:true` is only 1.40× slower than `sync:false` (34,054 vs 47,791 ops/s). Drop the
+batch size to 1 — one fsync per record — and sequential write falls from 2,995 to
+**76** ops/s, a 39× collapse. SQLite under the same workload goes from 31,136 to
+498 ops/s, the same order of magnitude, which says this is the physical cost of
 fsync rather than an implementation problem.
 
 Full data, including a metric-by-metric comparison against SQLite and the process of

@@ -62,14 +62,14 @@ db.sync()                            // 返回即代表整批已落盘
 
 | 指标 | 数值 |
 |---|---|
-| 顺序写 | 50 212 ops/s |
-| 随机写（覆盖写） | 12 724 ops/s |
-| 读延迟 P50 / P99 | 0.068 / 0.147 ms |
-| 范围扫描 | 32 895 rows/s |
+| 顺序写 | 55 658 ops/s |
+| 随机写（覆盖写） | 12 699 ops/s |
+| 读延迟 P50 / P99 | 0.053 / 0.111 ms |
+| 范围扫描 | 117 483 rows/s |
 | 空间放大 | 1.13× |
 
-组提交让「每批一次 fsync」只比不同步慢 9%；把批次改成 1（每条都等 fsync）
-则掉到 79 ops/s —— 39 倍差距。完整数据见仓库的
+组提交让「每批一次 fsync」只比不同步慢 1.40×；把批次改成 1（每条都等 fsync）
+则掉到 76 ops/s —— 39 倍差距。完整数据见仓库的
 [`docs/engineering/BENCHMARK.md`](https://github.com/PingGuoMiaoMiao/moonlsm/blob/main/docs/engineering/BENCHMARK.md)。
 
 ## 完整文档

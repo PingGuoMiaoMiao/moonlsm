@@ -11,6 +11,8 @@ target
 benches/python/data/
 benches/python/probe-data/
 benches/python/_t/
+# ADR-0008 的 A/B 对照：ab_base / ab_new / ab1m_base ...
+benches/python/ab*/
 
 # dbcli 在没设 MOONLSM_DATA 时的默认数据目录
 .moonlsm_data/

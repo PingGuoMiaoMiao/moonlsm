@@ -784,8 +784,11 @@ pub fn[S] Db::get(self : Db[S], key : Bytes) -> Bytes? {
     Some(e) => return if e.deleted { None } else { Some(e.value) }
     None => ()
   }
+  // 哈希只算一次，所有 SST 复用。100 万条数据在 L2 上约 77 个文件，
+  // 让每个文件各算一遍 FNV 是 77 倍的无谓开销。
+  let (h1, h2) = bloom_hashes(key)
   for s in self.ssts {
-    match s.reader.get(key) {
+    match s.reader.get_hashed(key, h1, h2) {
       Some(e) => return if e.deleted { None } else { Some(e.value) }
       None => ()
     }

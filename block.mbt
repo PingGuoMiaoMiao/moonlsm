@@ -421,3 +421,58 @@ pub fn Block::seek(self : Block, target : Bytes) -> Entry? {
   }
   None
 }
+
+///|
+/// 最后一条 entry。空 block 返回 `None`。
+///
+/// 用于「文件的最大 key」这个边界：index 里存的是每块的 `last_key`，
+/// 所以最后一个 index 条目的 key 就是整个文件的最大 key，
+/// 但要拿到它就得能取 block 的最后一条 —— `seek` 做不到这件事
+/// （key 是任意二进制，没有「比所有 key 都大」的哨兵值可传）。
+pub fn Block::last(self : Block) -> Entry? {
+  let n = self.restarts.length()
+  if n == 0 {
+    return None
+  }
+  // 从最后一个 restart 点开始走到底：restart 点的 entry 是完整 key，
+  // 之后各条是前缀压缩的，必须逐条解出 prev_key。
+  let mut pos = self.restarts[n - 1]
+  let mut prev : Bytes = b""
+  let mut found : Entry? = None
+  while pos < self.limit {
+    let e = match self.read_entry_at(pos, prev) {
+      Some(e) => e
+      None => return found
+    }
+    found = Some({
+      key: e.key,
+      value: e.value,
+      seq: e.seq,
+      deleted: e.deleted,
+    })
+    prev = e.key
+    pos = e.next
+  }
+  found
+}
+
+///|
+/// 第一条 entry。空 block 返回 `None`。
+///
+/// 与 `seek(b"")` 的区别：`seek` 要跑一次 `restart_index_for` 的二分，
+/// 而「第一条」根本不需要比较 —— 直接从第一个 restart 点解即可。
+pub fn Block::first(self : Block) -> Entry? {
+  if self.restarts.length() == 0 {
+    return None
+  }
+  match self.read_entry_at(self.restarts[0], b"") {
+    Some(e) =>
+      Some({
+        key: e.key,
+        value: e.value,
+        seq: e.seq,
+        deleted: e.deleted,
+      })
+    None => None
+  }
+}

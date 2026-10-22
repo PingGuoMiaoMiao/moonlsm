@@ -261,3 +261,112 @@ test "sst: scan_range 与全量筛选逐条一致（含块边界）" {
     assert_eq(got[0].key, @utf8.encode(keys[i]))
   }
 }
+
+///|
+/// 文件 key 区间的下界必须**真的**是下界。
+///
+/// 这条是整个范围判断的安全前提：`get` 现在会先用 `[lo, hi]` 排除文件，
+/// 如果 `lo` 比真实最小 key 大，落在 `[真实最小, lo)` 里的 key 会被跳过 ——
+/// 「数据明明在，却查不到」。所以这里逐个文件核对区间与全部条目的关系。
+test "sst: 文件区间必须真实包住所有 entry" {
+  for n in [1, 2, 17, 300, 3000] {
+    let raw = build_sst(n)
+    let r = must_open(raw)
+    let rng = match r.range {
+      Some(p) => p
+      None => {
+        assert_true(false)
+        (b"", b"")
+      }
+    }
+    let (lo, hi) = rng
+    let all = r.entries()
+    assert_eq(all.length(), n)
+    for e in all {
+      assert_true(compare_bytes(e.key, lo) >= 0)
+      assert_true(compare_bytes(e.key, hi) <= 0)
+    }
+    // 而且必须紧贴首尾两条 —— 松了说明取错了来源（比如拿了首块的 last_key 当下界）
+    assert_eq(all[0].key, lo)
+    assert_eq(all[n - 1].key, hi)
+  }
+}
+
+///|
+/// 区间两端的 key 必须查得到。这是最容易写错的地方：
+/// `hi` 用的是 `<=` 还是 `<`，差一个等号就丢一条。
+test "sst: 区间端点的 key 都能查到" {
+  let raw = build_sst(500)
+  let r = must_open(raw)
+  let (lo, hi) = match r.range {
+    Some(p) => p
+    None => {
+      assert_true(false)
+      (b"", b"")
+    }
+  }
+  assert_true(r.get(lo) is Some(_))
+  assert_true(r.get(hi) is Some(_))
+}
+
+///|
+/// 区间外紧邻的 key 查不到 —— 反方向也要验，
+/// 否则「范围判断恒为真」这种退化实现也能通过上面的测试。
+test "sst: 区间外的 key 查不到" {
+  let raw = build_sst(200)
+  let r = must_open(raw)
+  let (lo, hi) = match r.range {
+    Some(p) => p
+    None => {
+      assert_true(false)
+      (b"", b"")
+    }
+  }
+  // 比下界小：`"key:00000"` 是 `"key:000000"` 的严格前缀，字典序更小
+  let below = @utf8.encode("key:00000")
+  assert_true(compare_bytes(below, lo) < 0)
+  assert_true(r.get(below) is None)
+  // 比上界大一条
+  let above = @utf8.encode("key:99999" + "9")
+  assert_true(compare_bytes(above, hi) > 0)
+  assert_true(r.get(above) is None)
+}
+
+///|
+/// 空文件拿不到区间，必须退化成「不判断」而不是「判断为不相交」。
+/// 若这里返回 `Some` 并带一个空区间，任何 key 都会被排除。
+test "sst: 空文件不启用范围判断" {
+  let r = must_open(SstWriter::new().finish())
+  assert_true(r.range is None)
+  assert_true(r.get(@utf8.encode("x")) is None)
+}
+
+///|
+/// 单条 entry 的文件，上下界是同一个 key。
+test "sst: 单条 entry 的上下界相同" {
+  let w = SstWriter::new()
+  w.add(mk("only", "v", 1UL))
+  let r = must_open(w.finish())
+  let (lo, hi) = match r.range {
+    Some(p) => p
+    None => {
+      assert_true(false)
+      (b"", b"")
+    }
+  }
+  assert_eq(lo, @utf8.encode("only"))
+  assert_eq(hi, @utf8.encode("only"))
+  assert_true(r.get(@utf8.encode("only")) is Some(_))
+  assert_true(r.get(@utf8.encode("onl")) is None)
+  assert_true(r.get(@utf8.encode("onlz")) is None)
+}
+
+///|
+/// 区间完全在文件之外时，`scan_range` 直接返回空，连索引二分都不做。
+test "sst: 区间不相交时 scan_range 返回空" {
+  let r = must_open(build_sst(300))
+  let empty = r.scan_range(@utf8.encode("aaa"), @utf8.encode("aab"))
+  assert_eq(empty.length(), 0)
+  let empty2 = r.scan_range(@utf8.encode("zzz"), @utf8.encode("zzz~"))
+  assert_eq(empty2.length(), 0)
+}

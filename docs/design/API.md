@@ -68,9 +68,27 @@ Db::next_file_number() -> UInt64
 Db::check_version_invariants() -> Bool
 Db::wal_name() -> String
 Db::manifest_name() -> String
+
+// ADR-0008 加的：bloom 与块级游标的内部接口
+bloom_hashes(key) -> (UInt64, UInt64)
+BloomFilter::new_with(expected, bits_per_key, k) -> BloomFilter
+BloomFilter::put_hashes(h1, h2) -> Unit
+BloomFilter::may_contain_hashes(h1, h2) -> Bool
+BloomFilter::num_bits() -> Int
+BloomFilter::k() -> Int
+BloomFilter::popcount() -> Int
+SstReader::get_hashed(key, h1, h2) -> Entry?
+Block::first() -> Entry?
+Block::last() -> Entry?
 ```
 
-这四个之所以 `pub`，是给测试和 dbcli 用的。跨包使用它们等于依赖实现细节。
+这些之所以 `pub`，是为了三件事：给测试用、给 dbcli 用、给
+`benches/moon/bloom_probe` 做对照实验用。跨包使用它们等于依赖实现细节。
+
+`bloom_hashes` / `may_contain_hashes` 这一对的存在理由值得单独说：
+一次点查要探 N 个 SST 的 filter，用的是同一条 key，**哈希提到循环外**
+让成本从 N 次降到 1 次。这对接口是性能优化泄漏出来的形状，
+不是设计出来的抽象 —— 所以它属于内部级，不进契约。
 
 ---
 

@@ -201,6 +201,12 @@ pub struct SstReader {
   footer : SstFooter
   index : Block
   bloom : BloomFilter
+  /// 文件覆盖的 key 区间 `[lo, hi]`（闭区间，且是**真实下界/上界**）。
+  ///
+  /// `None` 表示「拿不到边界」—— 空文件、或首块解码失败。
+  /// 拿到 `None` 时所有范围判断都必须放行，不能猜：
+  /// 猜错下界的后果是「数据明明在，却被跳过」，这是不可接受的错误方向。
+  range : (Bytes, Bytes)?
 }
 
 ///|
@@ -263,6 +269,42 @@ pub fn open_sst(data : Bytes) -> SstReader? {
     Some(b) => b
     None => return None
   }
+  // 文件的 key 上界 = 最后一个 index 条目的 key（index 存的是每块的 last_key）。
+  // 下界 = 首块的第一条 key。两者都必须**真实**成立，否则范围判断会误杀数据。
+  let hi = match index.last() {
+    Some(e) => e.key
+    None => b""
+  }
+  let lo = if hi.length() == 0 {
+    b""
+  } else {
+    match index.first() {
+      Some(ie) =>
+        match decode_handle(ie.value) {
+          Some((off, size)) =>
+            if off + size > data.length() {
+              b""
+            } else {
+              match decode_block(data[off:off + size].to_owned()) {
+                Some(b) =>
+                  match b.first() {
+                    Some(e) => e.key
+                    None => b""
+                  }
+                None => b""
+              }
+            }
+          None => b""
+        }
+      None => b""
+    }
+  }
+  // 只有上下界都拿到（且不为空）才启用范围判断
+  let range = if hi.length() == 0 || lo.length() == 0 {
+    None
+  } else {
+    Some((lo, hi))
+  }
   Some({
     data,
     footer: {
@@ -275,6 +317,7 @@ pub fn open_sst(data : Bytes) -> SstReader? {
     },
     index,
     bloom,
+    range,
   })
 }
 
@@ -295,7 +338,34 @@ pub fn SstReader::block_count(self : SstReader) -> Int raise LsmError {
 ///
 /// 三步：bloom 快速否定 → index 定位 block → block 内二分。
 pub fn SstReader::get(self : SstReader, key : Bytes) -> Entry? {
-  if !self.bloom.may_contain(key) {
+  let (h1, h2) = bloom_hashes(key)
+  self.get_hashed(key, h1, h2)
+}
+
+///|
+/// 同 `get`，但复用调用方算好的双哈希。
+///
+/// 一次点查要探 N 个 SST 的 filter，用的是同一条 key ——
+/// 让每个文件各算一遍 FNV 是纯浪费。N 个文件时哈希成本从 N 次降到 1 次。
+pub fn SstReader::get_hashed(
+  self : SstReader,
+  key : Bytes,
+  h1 : UInt64,
+  h2 : UInt64,
+) -> Entry? {
+  // 先比 key 范围，再问 bloom。
+  //
+  // 顺序是有讲究的：范围判断是两次 `memcmp`，bloom 是 7 次随机位访问。
+  // L2 里的文件按 key 有序且互不重叠，一次未命中在 77 个文件里
+  // 有 76 个能被这一步直接排除 —— bloom 从探 77 次降到 1 次。
+  match self.range {
+    Some((lo, hi)) =>
+      if compare_bytes(key, lo) < 0 || compare_bytes(key, hi) > 0 {
+        return None
+      }
+    None => ()
+  }
+  if !self.bloom.may_contain_hashes(h1, h2) {
     return None
   }
   let idx = match self.index.seek(key) {
@@ -370,6 +440,15 @@ pub fn SstReader::scan_range(
   end : Bytes,
 ) -> Array[Entry] raise LsmError {
   let out : Array[Entry] = []
+  // 整个文件与查询区间不相交就直接返回空，连索引二分都不用做。
+  // 窄区间扫描时这一步能排除掉绝大多数文件。
+  match self.range {
+    Some((lo, hi)) =>
+      if compare_bytes(hi, start) < 0 || compare_bytes(lo, end) >= 0 {
+        return out
+      }
+    None => ()
+  }
   let ies = self.index.entries()
   // 二分：第一个 last_key >= start 的 block
   let mut lo = 0
