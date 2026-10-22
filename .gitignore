@@ -40,3 +40,6 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# 申报材料的预览中间件（由 application.html 临时派生）
+docs/submission/_preview.html

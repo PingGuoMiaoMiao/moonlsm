@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>moonlsm 项目申报书</title>
+<style>
+  @page { size: A4; margin: 12mm 13mm 11mm 13mm; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Microsoft YaHei", "PingFang SC", "Source Han Sans SC", sans-serif;
+    font-size: 8.7pt;
+    line-height: 1.46;
+    color: #1a1a1a;
+  }
+  h1 {
+    font-size: 15.5pt;
+    margin: 0 0 1.5pt 0;
+    letter-spacing: 0.2pt;
+  }
+  .sub {
+    font-size: 8.7pt;
+    color: #444;
+    margin: 0 0 2pt 0;
+  }
+  .lead {
+    font-size: 8.7pt;
+    color: #222;
+    margin: 0 0 5pt 0;
+    padding: 4pt 7pt;
+    background: #f4f6f8;
+    border-left: 2.6pt solid #2f6f8f;
+  }
+  h2 {
+    font-size: 9.9pt;
+    margin: 7.5pt 0 2.5pt 0;
+    padding-bottom: 1.5pt;
+    border-bottom: 0.6pt solid #cfd6dc;
+  }
+  p { margin: 0 0 2.5pt 0; text-align: justify; }
+  code {
+    font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+    font-size: 8.0pt;
+    background: #f2f3f5;
+    padding: 0 1.5pt;
+  }
+  pre {
+    font-family: "Cascadia Mono", Consolas, "Courier New", monospace;
+    font-size: 8.1pt;
+    line-height: 1.4;
+    background: #f7f8fa;
+    border: 0.5pt solid #e2e5e9;
+    padding: 3pt 5pt;
+    margin: 0 0 3.5pt 0;
+    white-space: pre-wrap;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 8.4pt;
+    margin: 0 0 3.5pt 0;
+  }
+  th, td {
+    border: 0.5pt solid #d8dde2;
+    padding: 1.6pt 4pt;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: #eef1f4; font-weight: 600; }
+  td.num { text-align: right; white-space: nowrap; }
+  .tight p { margin-bottom: 2pt; }
+  .note {
+    font-size: 7.9pt;
+    color: #555;
+    margin-top: 5pt;
+    padding-top: 3pt;
+    border-top: 0.6pt dashed #cfd6dc;
+  }
+  .tag {
+    display: inline-block;
+    font-size: 8pt;
+    color: #2f6f8f;
+    border: 0.5pt solid #b9cdd8;
+    border-radius: 2pt;
+    padding: 0 3pt;
+    margin-right: 3pt;
+  }
+</style>
+</head>
+<body>
+
+<h1>moonlsm — MoonBit 生态里的 LevelDB</h1>
+<p class="sub">嵌入式 LSM 存储引擎 · <code>PingGuoMiaoMiao/moonlsm</code> · mooncakes 0.2.0 · MIT</p>
+
+<p class="lead">写入先落 WAL 再返回，<code>kill -9</code> 之后已确认的数据一条不丢；
+同一个包在 native / wasm-gc / js 三个后端上构建。</p>
+
+<h2>痛点</h2>
+<p>MoonBit 已有两万多个包，数据方向是官方点名的方向，但<b>没有一个真正的 LSM 引擎</b>：
+<code>moonkv</code> 是 Bitcask 式的追加写，<code>moonjournalkit</code> 只做 WAL 分帧，
+两者都不做 SSTable 与 compaction。这意味着在 MoonBit 里做任何需要持久化的数据项目，
+都得自己从 WAL 写起；<code>moonsql</code>、<code>magpiedb</code> 这类上层项目因此没有可依赖的地基。</p>
+
+<h2>边界</h2>
+<p><b>做</b>：WAL + SSTable + 三层 leveled compaction + bloom filter + MANIFEST 崩溃恢复
++ 可插拔 <code>Storage</code> trait（native / wasm-gc / js）。
+<b>不做</b>：SQL、事务与 MVCC、压缩、value log 分离、分布式。
+这五项每一项都能单独吃掉一周，v1 明确排除，并写进 README 的能力矩阵。</p>
+
+<h2>API</h2>
+<pre>let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)
+let seq  = db.put(b"user:1", b"alice")          // 返回即代表已 fsync，不是「已进内存」
+let rows = db.scan(b"user:0", b"user:9", 100)   // [start, end)，跨层归并后有序</pre>
+
+<h2>测试策略</h2>
+<p>把「不丢数据」拆成五层可验收的关卡，每层有独立判据，<b>上一层绿了才有资格跑下一层</b>：
+198 条单元测试 → 协议连通探测 → 5000 步随机对拍 → 20 轮 <code>kill -9</code> → 100 万条性能基准。
+崩溃契约 C1–C5（已确认必不丢 / 未确认可丢 / 绝不读半条 / 绝不静默丢 / 前缀一致）
+每一条都对应到具体测试；写不进测试的（如「真断电」）明确标注为当前无法验证。</p>
+
+<h2>里程碑</h2>
+<table>
+  <tr><th style="width:12%">版本</th><th>内容</th><th style="width:26%">状态</th></tr>
+  <tr><td>v0.1</td><td>主链路打通：WAL / SST / MANIFEST / 三层归并，20 轮 <code>kill -9</code> 零丢失</td><td>已完成</td></tr>
+  <tr><td>v0.2</td><td>可嵌入：API 冻结草案 + 可跑示例，发布到 mooncakes</td><td>已发布（0.2.0，2026-10-21）</td></tr>
+  <tr><td>v1.0</td><td>产品化：流式扫描游标、block 级 CRC、WAL 句柄缓存、性能回归门禁</td><td>规划中</td></tr>
+</table>
+
+<h2>关键数字</h2>
+<table>
+  <tr><th style="width:26%">项目</th><th>数值</th></tr>
+  <tr><td>代码规模</td><td>5,260 行库与 CLI + 4,112 行测试（测试占 44%）</td></tr>
+  <tr><td>单元测试</td><td>198 条（native）/ 180 条（wasm-gc、js 根包）</td></tr>
+  <tr><td>顺序写 / 随机写</td><td>55,658 / 12,699 ops/s（100 万条，每批 1000 条）</td></tr>
+  <tr><td>点查延迟 P50 / P99</td><td>0.053 / 0.111 ms（命中）；0.040 ms（未命中）</td></tr>
+  <tr><td>范围扫描 / 空间放大</td><td>117,483 rows/s；1.13×（100 万条）</td></tr>
+  <tr><td>崩溃一致性</td><td>20/20 轮，每轮 2.7–6.5 万条写入，丢失 0、半条 0</td></tr>
+  <tr><td>工程文档</td><td>8 篇 ADR、中英双语 README、磁盘格式契约、验收手册、基准报告</td></tr>
+</table>
+
+<h2>可复现</h2>
+<pre>git clone https://github.com/PingGuoMiaoMiao/moonlsm &amp;&amp; cd moonlsm
+moon test                                              # 198 条单测
+moon build --target native --release
+cd benches/python &amp;&amp; python crash_test.py --rounds 20   # 20 轮 kill -9
+python demo.py                                          # 90 秒演示，四步带证据</pre>
+<p>CI：Ubuntu / macOS / Windows 三平台跑类型检查与单测，三个后端分别构建；崩溃测试是独立 workflow。</p>
+
+<h2>已知局限</h2>
+<p class="tight">不掩饰，都写在文档里：单条 <code>put</code> 只有 76 ops/s（Windows 上每次
+<code>fopen</code>/<code>fclose</code> 约 5.9 ms，修法是缓存 WAL 句柄）；范围扫描比 SQLite 慢一个数量级，
+根因是 <code>Db::scan</code> 仍是「整段读进数组再归并」而非流式游标；SST 没有 block 级 CRC，
+逐字节翻转 fuzz 显示 <b>42% 可发现、58% 被静默接受</b>——这个数字比一句「暂不支持」更能说明
+v1.1 该先做什么。</p>
+
+<p class="note"><code>kill -9</code> 只杀进程、不清操作系统页缓存，所以它证明不了 fsync 真的调了。
+能暴露这件事的是 WAL 尾部截断注入——已实现，见 <code>corruption_wbtest.mbt</code>。</p>
+
+</body>
+</html>

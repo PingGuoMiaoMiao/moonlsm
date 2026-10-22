@@ -7,6 +7,7 @@
 | `design/` | **契约**：系统「是什么」 | 实现服从文档。要改先改文档，再改实现 |
 | `adr/` | **决策记录**：为什么是现在这样 | 只追加，不改历史。决策变了就开新 ADR 取代旧的 |
 | `engineering/` | **过程**：怎么把它做出来 | 随方法论与阶段变化更新 |
+| `submission/` | **对外材料**：申报书与演示 | 只在申报/答辩时更新，与代码解耦 |
 
 ---
 
@@ -35,6 +36,26 @@
 
 ---
 
+## submission/ —— 对外材料
+
+| 文档 | 内容 |
+|---|---|
+| [APPLICATION.md](submission/APPLICATION.md) | **申报书正文**：痛点 / 边界 / API / 测试策略 / 里程碑，一页篇幅 |
+| [application.html](submission/application.html) | 排版源文件（A4 打印样式），改完用无头 Chrome 重新出 PDF |
+| [application.pdf](submission/application.pdf) | 提交用成品，A4 单页 |
+
+重新生成 PDF：
+
+```bash
+"/c/Program Files/Google/Chrome/Application/chrome.exe" --headless --disable-gpu \
+  --no-pdf-header-footer --print-to-pdf=application.pdf application.html
+```
+
+**字号 8.7pt 是实测出来的上限**：再大 0.05pt 就会溢到第二页。改内容后务必重新确认页数，
+「一页」是这份材料的硬约束——评审一天看几十份，翻页就是掉分。
+
+---
+
 ## adr/ —— 架构决策记录
 
 | 编号 | 标题 | 一句话结论 |
@@ -42,6 +63,11 @@
 | [0001](adr/0001-single-package.md) | 单包多文件，不按模块拆包 | API 边界靠「不写 `pub`」守，不靠包边界守 |
 | [0002](adr/0002-wal-format.md) | WAL 一条记录一帧，MANIFEST 用全量快照 | WAL 的日志性是本质需求，MANIFEST 的日志性是历史包袱 |
 | [0003](adr/0003-crash-contract.md) | 崩溃一致性契约 | `kill -9` 测不出「忘了 fsync」；承诺已确认必不丢，未确认允许丢 |
+| [0004](adr/0004-storage-abstraction.md) | 存储后端抽象 | 把平台差异关进一个文件，崩溃语义才能在 `moon test` 里断言 |
+| [0005](adr/0005-group-commit.md) | 组提交 | 一批只 fsync 一次，把 39× 的持久化代价压到 1.40× |
+| [0006](adr/0006-refuse-to-open-on-bad-manifest.md) | 坏 MANIFEST 拒绝启动 | 回退旧版本会静默丢掉已 ack 的数据，宁可不启动 |
+| [0007](adr/0007-compaction-levels-and-tombstones.md) | 三层归并、墓碑只在最底层丢 | 只有目标层是底层时才丢墓碑，否则删掉的数据会复活 |
+| [0008](adr/0008-bloom-layout-and-file-range-pruning.md) | bloom 布局与文件级剪枝 | 参数本来就最优，错的是「一次未命中要探 77 个文件」 |
 
 ### 读 ADR 的正确姿势
 
