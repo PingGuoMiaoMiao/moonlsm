@@ -143,6 +143,22 @@ def show_stats(cli, note=""):
     return st
 
 
+def short_path(path):
+    """录屏窗口只有 100 列，绝对路径一行 98 列，贴着右边会折行。
+
+    能相对就相对（demo 在 benches/python 下跑，显示成 `data`），
+    不能相对就只留末两段。折行会把「第 1 步」标题往下顶，画面难看。
+    """
+    try:
+        rel = os.path.relpath(path)
+    except ValueError:  # Windows 跨盘符没有相对路径
+        rel = path
+    if not rel.startswith(".."):
+        return rel
+    parts = path.replace("\\", "/").rstrip("/").split("/")
+    return "…/" + "/".join(parts[-2:])
+
+
 def show_disk(data_dir):
     print("  磁盘布局：")
     for name in sorted(os.listdir(data_dir)):
@@ -191,7 +207,7 @@ def main():
 
     print()
     print("moonlsm · 嵌入式 LSM 存储引擎")
-    print("MoonBit 实现 · 数据目录 %s" % data_dir)
+    print("MoonBit 实现 · 数据目录 %s" % short_path(data_dir))
 
     # ---- 第 1 步：写进去，重启还在 ----
     step(1, "写进去的东西，进程退出后还在")
