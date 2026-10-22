@@ -13,7 +13,7 @@
 用法：
     python demo.py                       # 默认回车模式：每段讲完按一次回车
     python demo.py --delay 20            # 固定停顿 20 秒，约 81 秒跑完
-    python demo.py --no-pause            # 不停顿，约 21 秒（测速 / 截图用）
+    python demo.py --no-pause            # 不停顿，约 23 秒（测速 / 截图用）
     python demo.py --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.exe"
 
 **90 秒演示的完整分镜、逐字稿、录制前检查、可能被追问的问题，
@@ -184,7 +184,11 @@ def main():
     ap.add_argument("--no-pause", dest="pause", action="store_false")
     ap.add_argument("--delay", type=float, default=0, metavar="SEC",
                     help="用固定停顿秒数代替回车。录屏时双手可以空出来念旁白；"
-                         "也适合先试跑一遍估算总时长（约 21 + 3×SEC 秒）")
+                         "也适合先试跑一遍估算总时长（约 23 + 3×SEC 秒）")
+    ap.add_argument("--row-delay", type=float, default=0.25, metavar="SEC",
+                    help="第 2 步每打完一行表格停一下（默认 0.25 秒，0 关闭）。"
+                         "实测不打会停的话 8 轮表格 1.1 秒就闪完了，观众眼睛"
+                         "跟不上『L0 从 1 数到 3』；停一下才看得出是在干活")
     args = ap.parse_args()
 
     data_dir = dbcli_launch.resolve_dir(args.data_dir, "./data")
@@ -253,6 +257,8 @@ def main():
             seen_l2 = True
             print("      ↑ L1 累计超过 1 MiB 目标，整层下沉到 L2")
             break
+        if args.row_delay > 0:
+            time.sleep(args.row_delay)
     assert seen_l1, "整个过程中 L1 从未出现，说明写入量选得让机制看不见"
     assert seen_l2, "%d 轮内 L2 从未出现" % MAX_ROUNDS
 
