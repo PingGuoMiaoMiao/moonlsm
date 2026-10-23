@@ -177,7 +177,7 @@ def show_disk(data_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cmd", default="../../_build/native/release/build/cmd/dbcli/dbcli.exe")
+    ap.add_argument("--cmd", default=dbcli_launch.DEFAULT_CMD)
     ap.add_argument("--data-dir", default="./data")
     ap.add_argument("--pause", dest="pause", action="store_true", default=True,
                     help="每一步之间等回车（默认开启）")

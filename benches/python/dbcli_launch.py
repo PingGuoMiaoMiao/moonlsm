@@ -34,6 +34,12 @@ import os
 
 ENV_VAR = "MOONLSM_DATA"
 
+# 默认二进制路径，相对 `benches/python`（所有驱动脚本的约定工作目录）。
+# 之前只有 demo.py 写死了这个字符串，其余脚本 --cmd 是必填 ——
+# 结果是申报书「可复现」那段里 `python crash_test.py --rounds 20`
+# 照抄下来会直接报 argparse 错。统一放这里，谁都不必再抄一遍。
+DEFAULT_CMD = "../../_build/native/release/build/cmd/dbcli/dbcli.exe"
+
 
 def resolve_dir(explicit, default):
     """决定本次测试用哪个数据目录。

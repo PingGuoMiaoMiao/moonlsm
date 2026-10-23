@@ -176,7 +176,9 @@ def run_round(args, rng, round_no):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cmd", required=True, help="启动 dbcli 的命令（用引号包起来）")
+    ap.add_argument("--cmd", default=dbcli_launch.DEFAULT_CMD,
+                    help="启动 dbcli 的命令（用引号包起来）。默认指向 release 构建，"
+                         "所以照文档直接跑 `python crash_test.py --rounds 20` 就能用")
     ap.add_argument("--data-dir", default="./data")
     ap.add_argument("--rounds", type=int, default=5)
     ap.add_argument("--batch", type=int, default=200)
