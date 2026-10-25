@@ -275,7 +275,7 @@ D6 同时改掉了一处「碰巧正确」的实现：归并后内存里 SST 的
 | D4 | 性能优化：bloom 调参、block size、compaction 策略 | 读放大或写放大有可量化改善 | ✅（bloom 重写 + 文件区间剪枝：未命中 −41%、扫描 3.6×，见 ADR-0008；block size 未调） |
 | D5 | 文档：README（中英）、架构图、benchmark 表 | 别人能照着跑起来 | ✅（README.md + README.en.md，Mermaid 架构图） |
 | D6 | 发布 mooncakes + CI + 在线 demo | `moon publish` 成功 | ✅（0.2.0 已上架，Server 200 OK；CI 三个 workflow） |
-| D7 | 申报书 + 90 秒 demo 视频 | 提交 | 🟡（申报书一页 PDF 已成稿，见 `docs/submission/`；录屏素材全部就位——逐字稿 + 提词器 + 实测过的节奏，只剩旁白待录） |
+| D7 | 申报书 + 90 秒 demo 视频 | 提交 | 🟡（申报书两版：`docs/submission/PROJECT-APPLICATION.md` 按官方模板填，用于上交；`APPLICATION.md` + PDF 是一页速读版。录屏素材就位，只剩旁白待录） |
 
 D2 的产出不只是测试，还有一张**损坏处理总表**（`format.md` §5.3）：
 按「坏在哪」分类，每类只有一个策略。判据始终是同一条 ——
