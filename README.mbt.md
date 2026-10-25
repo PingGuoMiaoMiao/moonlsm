@@ -6,10 +6,13 @@
 
 MoonBit 现有的 KV 存储都是 Bitcask 风格（追加文件 + 全量内存索引），内存随数据线性增长，没有分层合并。moonlsm 补的是 **LSM-tree**（memtable + SSTable + compaction）这块空白。
 
+> 「嵌入式」指 *embedded database* —— 像 SQLite 那样**链接进宿主进程**，
+> 不是跑在单片机 / MCU 上。它依赖 libc 与带 `fsync` 语义的文件系统。
+
 ## 状态
 
 可用。`kill -9` 不丢已确认的写入（`crash_test.py --rounds 20` 全 20 轮通过），
-180 条单元测试覆盖 WAL 截断恢复、MANIFEST 原子切换、三层归并、损坏注入。
+198 条单元测试覆盖 WAL 截断恢复、MANIFEST 原子切换、三层归并、损坏注入。
 
 ## 设计
 
