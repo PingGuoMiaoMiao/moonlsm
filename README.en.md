@@ -169,6 +169,12 @@ db.sync()
 - **No compression** (SSTables are stored in plaintext)
 - **No encryption, no authentication** (assumes single-process exclusive access to the directory)
 - **No distribution** (this is an embedded library, not a database server)
+- **Not for microcontrollers** ("embedded" here means *embedded database* — linked
+  **into a host process**, the way SQLite is, not running on an STM32. It needs libc,
+  a filesystem with real `fsync` semantics, and a tunable write buffer (8 MiB in the
+  examples); porting it to bare metal means replacing the whole `Storage` layer,
+  re-budgeting memory, and handling flash erase and brown-out detection yourself —
+  that is a different project)
 
 Stating what a project will *not* do is more useful than listing what it might.
 
