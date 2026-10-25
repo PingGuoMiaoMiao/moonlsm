@@ -248,6 +248,7 @@ locating each bottleneck, is in
 |---|---|
 | ✅ v0.1.0 | Competition release: crash 20/20, model_check 5,000 steps with 0 errors |
 | ✅ v0.2.0 | Embeddable: API freeze draft, runnable examples, all three backends build, published to mooncakes |
+| ✅ v0.2.1 | Read-path optimization: bit-packed bloom, single-pass hashing, file-level key-range pruning (miss P50 −41%, scan 3.6×) |
 | v0.3.0 | Observable: stats/metrics, reproducible benchmarks |
 | v0.5.0 | API frozen: semantic-versioning commitment, migration guide |
 | v1.0.0 | Product: multi-backend abstraction, performance regression gates, external users |
