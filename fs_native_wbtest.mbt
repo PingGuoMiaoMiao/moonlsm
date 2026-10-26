@@ -217,3 +217,124 @@ test "storage: NativeStorage 大文件往返（跨 64 KiB 缓冲）" {
     None => fail("big 应存在")
   }
 }
+
+// ---------------------------------------------------------------------------
+// 常开句柄（ADR-0009）
+//
+// 这一组测的不是「快了多少」，而是「缓存了句柄之后，那些原本靠
+// fopen/fclose 隐式保证的事情还成不成立」：
+//   - 追加位置还对吗（截断 / 删除 / 改名之后）
+//   - 另开句柄能读到刚写的字节吗（fflush 的可见性）
+//   - 该报错的地方还报错吗（对不存在的文件 fsync）
+// 每一条都对应一个「如果实现写错就会静默出错」的场景。
+// ---------------------------------------------------------------------------
+
+///|
+test "storage: 常开句柄跨多次追加仍按顺序落盘" {
+  let st = fresh_dir("cache_append")
+  Storage::write_file(st, "log.bin", b"")
+  for i in 0..<50 {
+    Storage::append_file(st, "log.bin", bytes_of_str("f\{i};"))
+  }
+  // 另开句柄读：能读到全部 50 段，说明每次追加都 fflush 过
+  match Storage::read_file(st, "log.bin") {
+    Some(v) => {
+      let s = str_of_bytes(v)
+      assert_true(s.has_prefix("f0;f1;f2;"))
+      assert_true(s.has_suffix("f49;"))
+      assert_eq(v.length(), Storage::file_size(st, "log.bin").unwrap())
+    }
+    None => fail("log.bin 应存在")
+  }
+}
+
+///|
+test "storage: 覆盖写之后再追加，从新内容末尾开始（不留旧位置）" {
+  let st = fresh_dir("cache_truncate")
+  Storage::append_file(st, "w.bin", bytes_of_str("old-old-old"))
+  // 覆盖写会关掉常开句柄；如果没关，追加位置会停在旧 EOF 之后，
+  // 结果要么多出全零空洞，要么把旧内容尾巴接在新内容后面
+  Storage::write_file(st, "w.bin", bytes_of_str("NEW"))
+  Storage::append_file(st, "w.bin", bytes_of_str("tail"))
+  match Storage::read_file(st, "w.bin") {
+    Some(v) => assert_eq(str_of_bytes(v), "NEWtail")
+    None => fail("w.bin 应存在")
+  }
+}
+
+///|
+test "storage: 删除后重建同名文件，读不到旧内容" {
+  let st = fresh_dir("cache_remove")
+  Storage::append_file(st, "w.bin", bytes_of_str("stale-stale-stale"))
+  Storage::remove_file(st, "w.bin")
+  Storage::append_file(st, "w.bin", bytes_of_str("fresh"))
+  match Storage::read_file(st, "w.bin") {
+    Some(v) => assert_eq(str_of_bytes(v), "fresh")
+    None => fail("w.bin 应存在")
+  }
+}
+
+///|
+test "storage: 改名之后再追加写的是新名字" {
+  // 这条在 Windows 上是硬要求：改名一个还开着的文件会直接失败。
+  let st = fresh_dir("cache_rename")
+  Storage::append_file(st, "a.bin", bytes_of_str("AAA"))
+  Storage::rename_file(st, "a.bin", "b.bin")
+  Storage::append_file(st, "b.bin", bytes_of_str("BBB"))
+  assert_true(Storage::read_file(st, "a.bin") is None)
+  match Storage::read_file(st, "b.bin") {
+    Some(v) => assert_eq(str_of_bytes(v), "AAABBB")
+    None => fail("b.bin 应存在")
+  }
+}
+
+///|
+test "storage: 显式 close 之后再追加仍然正常（自动重开）" {
+  let st = fresh_dir("cache_close")
+  Storage::append_file(st, "log.bin", bytes_of_str("one;"))
+  st.close()
+  Storage::append_file(st, "log.bin", bytes_of_str("two;"))
+  match Storage::read_file(st, "log.bin") {
+    Some(v) => assert_eq(str_of_bytes(v), "one;two;")
+    None => fail("log.bin 应存在")
+  }
+}
+
+///|
+test "storage: 常开句柄不影响「对不存在的文件 fsync 要报错」" {
+  // 缓存绝不能把「文件不存在」变成「静默成功」：
+  // 那是恢复路径上区分「没写过」和「写坏了」的唯一信号。
+  let st = fresh_dir("cache_sync_missing")
+  let mut raised = false
+  try {
+    Storage::sync_file(st, "nope.bin")
+  } catch {
+    _ => raised = true
+  }
+  assert_true(raised)
+  // 已经为别的文件缓存了句柄时，这条仍然要成立
+  Storage::append_file(st, "log.bin", bytes_of_str("x"))
+  let mut raised2 = false
+  try {
+    Storage::sync_file(st, "nope2.bin")
+  } catch {
+    _ => raised2 = true
+  }
+  assert_true(raised2)
+}
+
+///|
+test "storage: 两个实例各自缓存句柄，互不干扰" {
+  // 引擎正常只有一份 NativeStorage，但测试 / 工具里同时开两个实例很常见。
+  // 缓存是**实例级**的，一个实例的追加不该被另一个实例的句柄挡住。
+  let a = fresh_dir("cache_two")
+  let b = NativeStorage::new(".moonlsm_test/cache_two")
+  Storage::append_file(a, "log.bin", bytes_of_str("from-a;"))
+  Storage::append_file(b, "log.bin", bytes_of_str("from-b;"))
+  match Storage::read_file(a, "log.bin") {
+    Some(v) => assert_eq(str_of_bytes(v), "from-a;from-b;")
+    None => fail("log.bin 应存在")
+  }
+  a.close()
+  b.close()
+}

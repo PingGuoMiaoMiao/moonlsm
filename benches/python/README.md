@@ -9,7 +9,9 @@ benches/python/
 ├── model_check.py       ← 正确性对拍（和内存 dict 比）
 ├── probe_persistence.py ← 探测引擎是否已支持持久化（决定要不要跑崩溃测试）
 ├── bench.py             ← 性能基准（输出可直接贴 PPT 的表格）
-├── dbcli_launch.py      ← 数据目录/环境变量的唯一来源，三个脚本共用
+├── bench_sqlite.py      ← 同一个 workload 跑 SQLite，给数字一个锚点
+├── read_ab.py           ← 只读 A/B：同一份数据的两个副本，隔离写阶段的影响
+├── dbcli_launch.py      ← 数据目录/环境变量的唯一来源，几个脚本共用
 ├── mock_dbcli.py        ← 假的实现，只用来验证上面三个脚本本身有效
 └── REFERENCES.md        ← 跨语言同类实现调研
 ```

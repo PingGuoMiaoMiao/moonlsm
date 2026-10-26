@@ -211,22 +211,94 @@ fn write_all_to(f : UInt64, data : Bytes, what : String) -> String {
 }
 
 ///|
+/// 常开的追加句柄。只记 `name` 和 `FILE*`：模式永远是 `"ab"`，
+/// 因为只有追加路径需要它（见 `NativeStorage::handle_for`）。
+struct AppendHandle {
+  name : String
+  f : UInt64
+}
+
+///|
 /// 文件系统后端。
 ///
-/// 每次操作都 fopen / fclose，不保持常开句柄。这是有意的取舍：
-/// 常开句柄要处理「多个 WAL / SST 同时打开」「close 时怎么保证顺序」
-/// 这些状态问题，而现在这一层的目的是先把**语义**跑通。
-/// 代价是每次追加有几次系统调用的开销，压测时会明显——
-/// 见 CHANGELOG 的「已知技术债」，优化点是引入一个带缓冲的句柄表。
+/// **追加路径保持一个常开句柄**（ADR-0009）。同场 A/B：单条 `put`
+/// 56–64 → 384–399 ops/s（约 6.3×）。
+///
+/// 成本不在「两次 `fopen`」本身 —— 拆开量，`fopen`+写+`fclose` 只要 0.83 ms，
+/// `fopen`+`fsync`+`fclose` 只要 1.11 ms，但**两步连起来要 9.88 ms**。
+/// 差额来自「关掉写句柄、再重新打开去 fsync」这个组合；常开句柄把它换成
+/// 「同一个句柄上 `fflush` + `fsync`」，2.07 ms。
+///
+/// 只缓存**一个**句柄，不做句柄表：
+/// - 写路径上真正反复打开的只有活跃 WAL；SST / MANIFEST 是一次成型文件，
+///   缓存它们只是增加「什么时候失效」的状态。
+/// - 一个句柄的失效规则简单到可以逐条列出来（`write_file` / `rename_file` /
+///   `remove_file` 全部先关），不会出现「表里某个条目忘了失效」的漏洞。
+///
+/// 失效是**无条件**的，不判断文件名是否相同：这三个操作都很少发生，
+/// 多关一次的代价只是一次 `fopen`，而漏关一次的代价是 Windows 上
+/// 「删不掉 / 改不了名」——那种 bug 只在特定平台特定顺序下出现。
+///
+/// 语义没有任何变化：`append_*` 仍然不隐含 fsync，`sync_file` 仍然是
+/// C1 的唯一实现点。`fflush` 在每次追加后立刻调用，所以「另开句柄读」
+/// 看到的仍然是已写入的全部字节。
 pub struct NativeStorage {
   root : String
+  /// 常开的追加句柄，最多一个。`None` 表示当前没有缓存。
+  mut handle : AppendHandle?
 }
 
 ///|
 /// `root` 是数据目录。传空串表示当前目录。
 /// 所有文件路径都是 `root + "/" + name`，Windows 也接受 `/` 作为分隔符。
 pub fn NativeStorage::new(root : String) -> NativeStorage {
-  { root, }
+  { root, handle: None }
+}
+
+///|
+/// 关掉常开句柄。没有缓存时是空操作。
+///
+/// 调用时机由内部逻辑决定（写覆盖 / 改名 / 删除前）；外部只在
+/// 「确定不再写这个目录」时调用，比如测试收尾、进程退出前。
+/// 不调用也不会丢数据 —— 未 fsync 的数据在 OS 页缓存里，
+/// 而句柄本身由 OS 在进程退出时回收。
+pub fn NativeStorage::close(self : NativeStorage) -> Unit {
+  self.close_handle()
+}
+
+///|
+fn NativeStorage::close_handle(self : NativeStorage) -> Unit {
+  match self.handle {
+    Some(h) => {
+      ignore(c_fclose(h.f))
+      self.handle = None
+    }
+    None => ()
+  }
+}
+
+///|
+/// 取 `name` 的追加句柄：命中缓存直接返回，否则关旧开新。
+fn NativeStorage::handle_for(
+  self : NativeStorage,
+  name : String,
+) -> UInt64 raise LsmError {
+  let cached = match self.handle {
+    Some(h) => if h.name == name { Some(h.f) } else { None }
+    None => None
+  }
+  match cached {
+    Some(f) => f
+    None => {
+      // 换文件（或还没有缓存）：先关旧的再开新的。
+      // 顺序不能反 —— 反了就是两个句柄同时开着，Windows 上第一个
+      // 会一直占着文件，直到进程退出。
+      self.close_handle()
+      let f = self.open_or_fail(name, "ab")
+      self.handle = Some({ name, f })
+      f
+    }
+  }
 }
 
 ///|
@@ -391,6 +463,11 @@ pub impl Storage for NativeStorage with fn read_file(self, name) -> Bytes? raise
 
 ///|
 pub impl Storage for NativeStorage with fn write_file(self, name, data) -> Unit raise LsmError {
+  // 覆盖写会截断文件，而截断与「另一个还开着的句柄」混用是不可推理的：
+  // 那个句柄的追加位置、CRT 缓存的文件长度都可能停在旧值上。
+  // 与其论证「`ab` 模式下每次写都会重新定位到末尾所以没事」，
+  // 不如直接关掉 —— 一次 fopen 换掉一整类平台相关的疑虑。
+  self.close_handle()
   let f = self.open_or_fail(name, "wb")
   let err = write_all_to(f, data, name)
   // fflush 把 stdio 缓冲交给 OS；是否真正落盘由 sync_file 决定。
@@ -404,17 +481,22 @@ pub impl Storage for NativeStorage with fn write_file(self, name, data) -> Unit 
 
 ///|
 pub impl Storage for NativeStorage with fn append_file(self, name, data) -> Unit raise LsmError {
-  let f = self.open_or_fail(name, "ab")
+  let f = self.handle_for(name)
   let err = write_all_to(f, data, name)
+  // 常开句柄意味着数据会跨调用留在 stdio 缓冲里。这里必须立刻 fflush：
+  // 不刷的话，另开句柄的 `read_file` 看不到刚写的字节，而恢复路径正是
+  // 「写完 WAL 立刻读回来」的。
   ignore(c_fflush(f))
-  ignore(c_fclose(f))
   if err != "" {
+    // 写失败之后句柄的内部状态不可信（部分写入 + 错误标志），
+    // 关掉让下一次重开，而不是带着错误标志继续用。
+    self.close_handle()
     raise LsmError::io(err)
   }
 }
 
 ///|
-/// 批量追加：**一次 fopen，N 次 fwrite，一次 fclose**。
+/// 批量追加：**一次取句柄，N 次 fwrite**。
 ///
 /// 这不是微优化，是量级差异。Windows 上实测单次 `fopen`+`fclose`
 /// 约 5.9 ms（杀软实时扫描 / 句柄创建都算在内），而 `fwrite` 几百字节
@@ -427,12 +509,15 @@ pub impl Storage for NativeStorage with fn append_file(self, name, data) -> Unit
 ///
 /// 实测从 1200ms 降到 6ms，两个数量级。
 ///
-/// 出错时先 fclose 再抛错，不留泄漏的句柄（与 `write_all_to` 的约定一致）。
+/// ADR-0009 之后「一次」可能降到零：活跃 WAL 的句柄是常开的，
+/// 这一批直接复用它。
+///
+/// 出错时先关句柄再抛错，不留「带着错误标志」的缓存。
 pub impl Storage for NativeStorage with fn append_frames(self, name, chunks) -> Unit raise LsmError {
   if chunks.length() == 0 {
     return
   }
-  let f = self.open_or_fail(name, "ab")
+  let f = self.handle_for(name)
   let mut err = ""
   for c in chunks {
     // 一旦出错就停：继续写只会产生更多垃圾，而且错误信息会被后面的覆盖
@@ -441,31 +526,59 @@ pub impl Storage for NativeStorage with fn append_frames(self, name, chunks) -> 
     }
   }
   ignore(c_fflush(f))
-  ignore(c_fclose(f))
   if err != "" {
+    self.close_handle()
     raise LsmError::io(err)
   }
 }
 
 ///|
 pub impl Storage for NativeStorage with fn sync_file(self, name) -> Unit raise LsmError {
-  // "rb+" 不截断、不创建：对一个还不存在的文件做 fsync 是逻辑错误，
-  // 应该报错而不是悄悄建一个空文件出来。
-  let f = self.open_or_fail(name, "rb+")
-  let fd = c_fileno(f)
-  if fd < 0 {
-    ignore(c_fclose(f))
-    raise LsmError::io("取文件描述符失败 (\{name})")
+  let cached = match self.handle {
+    Some(h) => if h.name == name { Some(h.f) } else { None }
+    None => None
   }
-  let rc = c_sync_fd(fd)
-  ignore(c_fclose(f))
-  if rc != 0 {
-    raise LsmError::io("fsync 失败 (\{name})")
+  match cached {
+    Some(f) => {
+      // 命中缓存：fflush + fsync 同一个 fd，不再 fopen/fclose。
+      // 这是单条 `put` 从 13.2 ms 降到 ~1 ms 的那一刀。
+      ignore(c_fflush(f))
+      let fd = c_fileno(f)
+      if fd < 0 {
+        self.close_handle()
+        raise LsmError::io("取文件描述符失败 (\{name})")
+      }
+      if c_sync_fd(fd) != 0 {
+        // fsync 失败说明介质或句柄出了问题，不再复用这个句柄。
+        self.close_handle()
+        raise LsmError::io("fsync 失败 (\{name})")
+      }
+    }
+    None => {
+      // 没有缓存：沿用「打开 → fsync → 关闭」。
+      // "rb+" 不截断、不创建：对一个还不存在的文件做 fsync 是逻辑错误，
+      // 应该报错而不是悄悄建一个空文件出来。
+      let f = self.open_or_fail(name, "rb+")
+      let fd = c_fileno(f)
+      if fd < 0 {
+        ignore(c_fclose(f))
+        raise LsmError::io("取文件描述符失败 (\{name})")
+      }
+      let rc = c_sync_fd(fd)
+      ignore(c_fclose(f))
+      if rc != 0 {
+        raise LsmError::io("fsync 失败 (\{name})")
+      }
+    }
   }
 }
 
 ///|
 pub impl Storage for NativeStorage with fn rename_file(self, from, to) -> Unit raise LsmError {
+  // Windows 不允许改名一个被自己打开的文件（sharing violation），
+  // POSIX 允许但会让「改名后旧句柄继续写」变成一次静默的数据错乱。
+  // 所以先关缓存，不管改的是不是缓存里的那个文件。
+  self.close_handle()
   if rename_at(self.path(from), self.path(to)) != 0 {
     raise LsmError::io("改名失败 (\{from} -> \{to})")
   }
@@ -477,6 +590,9 @@ pub impl Storage for NativeStorage with fn rename_file(self, from, to) -> Unit r
 
 ///|
 pub impl Storage for NativeStorage with fn remove_file(self, name) -> Unit raise LsmError {
+  // 同 rename：Windows 上删不掉一个被打开的文件。
+  // 这一步在 `flush` 里删旧 WAL 时一定会走到，而旧 WAL 正是缓存里的那个。
+  self.close_handle()
   // 不存在不算错误：恢复路径会重复清理同一批文件。
   ignore(c_remove(self.path(name)))
 }
