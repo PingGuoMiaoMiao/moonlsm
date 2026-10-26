@@ -154,9 +154,15 @@
 
 | 对照组 | 怎么跑 | 想证明什么 |
 |---|---|---|
-| `moonkv`（Bitcask） | 用同一套 dbcli 协议包一层 | 写吞吐更高、内存不随数据线性增长 |
+| `moonkv`（Bitcask） | 用同一套 dbcli 协议包一层（已做，见 `benches/moon/moonkv_cli/`） | ~~写吞吐更高~~、内存不随数据线性增长 |
 | SQLite | 同 workload | 顺序写 vs 原地更新的差异 |
 | LevelDB / RocksDB | 官方 `db_bench` | 作为上限参考，诚实说明差距 |
+
+> **实测修正**：原来这里预测 moonkv「写吞吐更高」，实际是反的 ——
+> 同一套脚本、1 万条、单条提交下，moonlsm 482 ops/s（每条都 fsync）
+> 对 moonkv 96 ops/s（只 fflush）。原因是 moonkv 每个 `put` 都开关一次文件，
+> 而 `putmany` 在这边是组提交。完整对照见 `BENCHMARK.md` §3.5。
+> **预测写在文档里，就该在测完之后回来改。**
 
 **别装作能打赢 RocksDB。** 说「在 10 万条规模下达到 RocksDB 的 40%，但代码只有它的 1/10，且完整支持 kill -9 恢复」——这种表述评委更信。
 
