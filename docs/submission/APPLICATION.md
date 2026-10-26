@@ -30,7 +30,7 @@ let rows = db.scan(b"user:0", b"user:9", 100)   // [start, end)，跨层归并�
 ## 测试策略
 
 把「不丢数据」拆成五层可验收的关卡，每层有独立判据，**上一层绿了才有资格跑下一层**：
-198 条单元测试 → 协议连通探测 → 5000 步随机对拍 → 20 轮 `kill -9` → 100 万条性能基准。
+205 条单元测试 → 协议连通探测 → 5000 步随机对拍 → 20 轮 `kill -9` → 100 万条性能基准。
 崩溃契约 C1–C5（已确认必不丢 / 未确认可丢 / 绝不读半条 / 绝不静默丢 / 前缀一致）
 每一条都对应到具体测试，写不进测试的（如「真断电」）明确标注为当前无法验证。
 
@@ -47,7 +47,7 @@ let rows = db.scan(b"user:0", b"user:9", 100)   // [start, end)，跨层归并�
 | 项目 | 数值 |
 |---|---|
 | 代码规模 | 5,260 行库与 CLI + 4,112 行测试（测试占 44%） |
-| 单元测试 | 198 条（native）/ 180 条（wasm-gc、js 根包） |
+| 单元测试 | 205 条（native）/ 180 条（wasm-gc、js 根包） |
 | 顺序写 / 随机写 | 55,658 / 12,699 ops/s（100 万条，每批 1000 条） |
 | 点查延迟 P50 / P99 | 0.053 / 0.111 ms（命中），0.040 ms（未命中） |
 | 范围扫描 | 117,483 rows/s |
@@ -59,7 +59,7 @@ let rows = db.scan(b"user:0", b"user:9", 100)   // [start, end)，跨层归并�
 
 ```bash
 git clone https://github.com/PingGuoMiaoMiao/moonlsm && cd moonlsm
-moon test                                              # 198 条单测
+moon test                                              # 205 条单测
 moon build --target native --release
 cd benches/python && python crash_test.py --rounds 20   # 20 轮 kill -9
 python demo.py                                          # 90 秒演示，四步带证据
@@ -69,8 +69,7 @@ CI：Ubuntu / macOS / Windows 三平台跑类型检查与单测，三个后端�
 
 ## 已知局限
 
-不掩饰，都写在文档里：单条 `put` 只有 76 ops/s（Windows 上每次 `fopen`/`fclose`
-约 5.9 ms，修法是缓存 WAL 句柄）；范围扫描比 SQLite 慢一个数量级，根因是
+不掩饰，都写在文档里：范围扫描比 SQLite 慢一个数量级，根因是
 `Db::scan` 仍是「整段读进数组再归并」而非流式游标；SST 没有 block 级 CRC，
 逐字节翻转 fuzz 显示 **42% 可发现、58% 被静默接受**——这个数字比一句「暂不支持」
 更能说明 v1.1 该先做什么。
