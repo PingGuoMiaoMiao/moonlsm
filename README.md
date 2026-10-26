@@ -230,7 +230,8 @@ python bench.py        --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.
 | ✅ v0.2.0 | 可嵌入：API 冻结草案、examples 可跑、三后端构建通过、发布到 mooncakes |
 | ✅ v0.2.1 | 读路径优化：bloom 位图打包 + 哈希只算一遍 + 文件级 key 区间剪枝（未命中 P50 −41%、扫描 3.6×） |
 | ✅ v0.2.2 | 写路径优化：常开 WAL 句柄，单条 `put` 76 → 390 ops/s（同场 6.3×） |
-| v0.3.0 | 可观测：stats/metrics、bench 可复现 |
+| ✅ v0.3.0 | 磁盘格式 v2：data / index / filter block 加 CRC32C，单字节损坏检出率 42% → 95.7%（ADR-0010） |
+| v0.4.0 | 可观测：stats/metrics、bench 可复现 |
 | v0.5.0 | API 冻结：语义化版本承诺、迁移指南 |
 | v1.0.0 | 产品：多后端抽象、性能回归门禁、外部用户 |
 

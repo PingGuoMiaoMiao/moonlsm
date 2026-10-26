@@ -250,7 +250,8 @@ locating each bottleneck, is in
 | ✅ v0.2.0 | Embeddable: API freeze draft, runnable examples, all three backends build, published to mooncakes |
 | ✅ v0.2.1 | Read-path optimization: bit-packed bloom, single-pass hashing, file-level key-range pruning (miss P50 −41%, scan 3.6×) |
 | ✅ v0.2.2 | Write-path optimization: persistent WAL handle, single `put` 76 → 390 ops/s (6.3× same-session) |
-| v0.3.0 | Observable: stats/metrics, reproducible benchmarks |
+| ✅ v0.3.0 | On-disk format v2: CRC32C on data / index / filter blocks, single-byte corruption detection 42% → 95.7% (ADR-0010) |
+| v0.4.0 | Observable: stats/metrics, reproducible benchmarks |
 | v0.5.0 | API frozen: semantic-versioning commitment, migration guide |
 | v1.0.0 | Product: multi-backend abstraction, performance regression gates, external users |
 

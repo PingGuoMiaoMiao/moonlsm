@@ -71,6 +71,8 @@
 | [0006](adr/0006-refuse-to-open-on-bad-manifest.md) | 坏 MANIFEST 拒绝启动 | 回退旧版本会静默丢掉已 ack 的数据，宁可不启动 |
 | [0007](adr/0007-compaction-levels-and-tombstones.md) | 三层归并、墓碑只在最底层丢 | 只有目标层是底层时才丢墓碑，否则删掉的数据会复活 |
 | [0008](adr/0008-bloom-layout-and-file-range-pruning.md) | bloom 布局与文件级剪枝 | 参数本来就最优，错的是「一次未命中要探 77 个文件」 |
+| [0009](adr/0009-cached-wal-handle.md) | 常开一个追加句柄 | 单条 `put` 的成本全在「每条写开关两次文件」上，不在 `fsync` 上 |
+| [0010](adr/0010-block-and-filter-crc.md) | block / filter 加 CRC，格式升到 v2 | filter 坏了会**主动丢数据**；校验必须在打开时做，因为 `get` 无法表达「读不懂」 |
 
 ### 读 ADR 的正确姿势
 

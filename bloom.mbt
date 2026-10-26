@@ -198,35 +198,85 @@ pub fn BloomFilter::popcount(self : BloomFilter) -> Int {
 }
 
 ///|
-/// 编码成格式规范 §3.3 的字节布局：
-/// `k(1B) | num_bits(varint32) | bits[num_bits/8]`
+/// 编码成格式规范 §3.3 的字节布局（v2）：
+/// `k(1B) | num_bits(varint32) | bits[num_bits/8] | crc32c(4B)`
 ///
 /// 因为内存里已经是打包好的位图，这里只做整段拷贝，
 /// 不再逐位重排 —— 早先的实现每 8 个 bool 要跑一轮内层循环。
+///
+/// 尾部 CRC 是 v2 加的（ADR-0010）。理由不是「顺手统一」：
+/// filter 没有 CRC 时，一个坏掉的位图会让 `may_contain` 返回 **false**，
+/// 于是「数据明明在，却查不到」—— 这是唯一一种会**主动丢数据**的损坏方向，
+/// 比报错难查得多。fuzz 也证实了：加 CRC 之前，整个 filter 区域 80 个位置
+/// 全部漏检。
 pub fn BloomFilter::encode(self : BloomFilter) -> Bytes {
+  self.encode_with(true)
+}
+
+///|
+/// 产出**格式版本 1** 的 filter 字节（没有尾部 CRC）。
+///
+/// 只被 `SstWriter` 的 v1 写入路径用到 —— 那条路径存在的唯一目的是
+/// 让兼容性测试能造出老文件，见 `sstable_wbtest.mbt`。
+fn BloomFilter::encode_v1(self : BloomFilter) -> Bytes {
+  self.encode_with(false)
+}
+
+///|
+fn BloomFilter::encode_with(self : BloomFilter, with_crc : Bool) -> Bytes {
+  let body = Buffer::Buffer()
+  body.write_byte(self.k.to_byte())
+  write_varint32(body, self.num_bits)
+  body.write_bytes(Bytes::from_array(self.bits[:])[:])
+  let raw = body.to_bytes()
+  if !with_crc {
+    return raw
+  }
   let out = Buffer::Buffer()
-  out.write_byte(self.k.to_byte())
-  write_varint32(out, self.num_bits)
-  out.write_bytes(Bytes::from_array(self.bits[:])[:])
+  out.write_bytes(raw[:])
+  write_fixed32u(out, crc32c(raw))
   out.to_bytes()
 }
 
 ///|
-/// 从字节解码 filter。结构不一致时返回 `None`。
+/// 从字节解码 filter（**格式版本 2**，尾部带 CRC）。结构不一致或 CRC 不符时返回 `None`。
 ///
 /// 这里**校验得比较严**（k 的范围、位图长度必须与 num_bits 精确匹配）：
 /// filter 读错不会直接导致数据错误，但会让「假阴性」出现 ——
 /// 而假阴性意味着「数据明明在，却查不到」，这是 LSM 里最不可接受的错误。
 /// 宁可判定文件损坏、拒绝打开，也不要拿着一个半信半疑的 filter 去过滤。
 pub fn decode_bloom(data : Bytes) -> BloomFilter? {
-  if data.length() < 2 {
+  if data.length() < 2 + 4 {
+    return None
+  }
+  let body_len = data.length() - 4
+  let want = match read_fixed32u(data, body_len) {
+    Some(v) => v
+    None => return None
+  }
+  if crc32c(data[:body_len].to_owned()) != want {
+    return None
+  }
+  parse_bloom(data, body_len)
+}
+
+///|
+/// 解码**格式版本 1** 的 filter（没有尾部 CRC）。只在读 v1 文件时走这里。
+pub fn decode_bloom_v1(data : Bytes) -> BloomFilter? {
+  parse_bloom(data, data.length())
+}
+
+///|
+/// `end` 指向 filter 结构结束的位置：v2 传 `n - 4`（跳过 CRC），v1 传 `n`。
+fn parse_bloom(data : Bytes, end : Int) -> BloomFilter? {
+  if end < 2 {
     return None
   }
   let k = data[0].to_int()
   if k < 1 || k > 30 {
     return None
   }
-  let (nbits, body_start) = match read_varint32(data, 1, data.length()) {
+  let (nbits, body_start) = match read_varint32(data, 1, end) {
     Some(pair) => pair
     None => return None
   }
@@ -235,7 +285,7 @@ pub fn decode_bloom(data : Bytes) -> BloomFilter? {
     return None
   }
   let nbytes = (nbits + 7) / 8
-  if body_start + nbytes != data.length() {
+  if body_start + nbytes != end {
     return None
   }
   Some({

@@ -139,6 +139,8 @@ entry_1:  ...
 +-----------------------------------+
 | num_restarts        (uint32 LE)   |
 +-----------------------------------+
+| crc32c              (uint32 LE)   |   ← v2 新增，覆盖它之前的全部字节
++-----------------------------------+
 ```
 
 - `type`：`0x00` = 正常值，`0x01` = **墓碑**（该 key 已删除）。
@@ -147,6 +149,10 @@ entry_1:  ...
 - `seq`：这条记录的写入序号，`varint64`。**v1 修订时新增，见 §3.2.1。**
 - `shared`：与**上一个 key** 的公共前缀长度。restart 点的 `shared` 恒为 0。
 - `non_shared`：本条 key 去掉前缀后的长度。
+- 尾部 `crc32c`（**v2 起**，ADR-0010）：覆盖 entry 区 + restart 数组 + `num_restarts`。
+  校验范围含结构区而不只是 entry 区 —— `num_restarts` 被改成一个仍然能通过
+  边界检查的值时，读端会把 entry 区当 restart 数组读，得到「结构合法但内容错乱」
+  的 block，这种损坏只有 CRC 能拦。
 - restart 间隔：**16 条**一条 restart point。
 - 一个 data block 的目标大小：**4 KiB**（未压缩，见 §3.6）。超了就切下一块，且切点必须落在 entry 边界。
 - block 内部 key 严格升序，**不允许重复 key**（同一 key 的多版本在 compaction 阶段已被折叠）。
@@ -169,8 +175,13 @@ entry_1:  ...
 ### 3.3 filter block（Bloom）
 
 ```
-| k (1B) | num_bits (varint32) | bits[ceil(num_bits/8)] |
+| k (1B) | num_bits (varint32) | bits[ceil(num_bits/8)] | crc32c (4B) |
 ```
+
+尾部 CRC 也是 **v2 起**（ADR-0010）。filter 看起来「只是加速用的，坏了就当作
+全部命中」，但这个直觉是错的：位图被改坏时 `may_contain` 会返回 **false**，
+于是引擎理直气壮地回答「没有这个 key」—— 这是唯一一种会**主动丢数据**的损坏方向。
+它必须和 data block 一样被校验。
 
 - 默认 `bits_per_key = 10`，`k = 7`（由 `k = round(bits_per_key * ln2)` 得出）。
 - 哈希：**双哈希构造** —— `h1 = FNV-1a 32(key)`，`h2 = FNV-1a 32(key 反转)`，第 i 个探测位置 `= (h1 + i * h2) % num_bits`。
@@ -212,12 +223,24 @@ index block **就是一个 §3.2 编码的 data block**，不另立格式。每�
 | 16 | 8 | `index_offset`（uint64 LE） |
 | 24 | 8 | `index_size`（uint64 LE） |
 | 32 | 8 | `smallest_seq`（uint64 LE，本文件包含的最小 seq，用于快照读） |
-| 40 | 4 | `version`（uint32 LE，= 1） |
+| 40 | 4 | `version`（uint32 LE，= 2；`1` 仍可读） |
 | 44 | 4 | `magic`（`"MSST"`，`0x4D 0x53 0x53 0x54`） |
 
-**footer 自身不做 CRC**。理由：footer 被写坏时 `magic` 校验基本必然失败（4 字节固定值），而 data block 的完整性由上层 `verify` 命令单独负责。为 footer 再加一个 CRC 字段会把 48 字节撑到 52，破坏对齐，收益不划算。这是有意识的取舍，不是遗漏。
+**footer 自身不做 CRC**，并且**这是 v2 之后唯一没被校验覆盖的地方**。
 
-> 待定：v1.1 若引入 block 级 CRC，会在 data block 尾部加 4 字节 CRC 并 bump `version` 到 2。
+理由不是「不重要」，而是**没有位置放**：读端定位 footer 的方式是「从文件末尾
+倒推 48 字节」，这个 48 必须与版本无关 —— 否则读端得先知道版本才能算 footer
+在哪，而版本本身就在 footer 里。塞进一个 CRC 就要撑到 52，读端得先猜是 48
+还是 52，猜错的代价比收益大。
+
+代价是量化的：fuzz 用例把一个 185 字节的 SST 逐个位置翻转，
+**177 个位置被拒绝（95.7%）**，剩下 8 个位置全部落在 `smallest_seq` 字段上。
+它只用于快照读的下界，不参与任何数据定位 —— 改坏它的后果是「快照读的下界
+不准」，不是「数据读不出来」也不是「读出错值」。另外 32 个字节的偏移/长度字段
+虽然也没有 CRC，但它们被区域边界检查间接覆盖，翻转后基本都会越界。
+
+> v1.2 若要收掉这 8 个字节：把 `smallest_seq` 挪进 MANIFEST（那里本来就有
+> 每层每个文件的元信息），腾出的 8 字节放 footer 自己的 CRC + 4 字节 reserved。
 
 ### 3.6 关于压缩
 
@@ -353,6 +376,7 @@ SST 元信息本身很小（1 万个 SST 也才 400 KB），而 compaction 触�
 | 读到 `version < 当前支持` | 必须能读（向后兼容）。若不能，必须在 CHANGELOG 里写明并提供迁移工具 |
 | 新增字段 | 只能追加到该结构的**末尾**，且旧字段偏移不变 |
 | 删除字段 | 只能标记为 reserved 并跳过，不得让后续字段偏移变化 |
+| 已有先例 | `version 1 → 2`（ADR-0010）给 data block / filter block 追加尾部 CRC，写端只写 2，读端同时认 1 与 2。老库不需要迁移工具，下一次 compaction 会自然重写成 v2 |
 
 **永远不要**「猜一个未知版本怎么读」。宁可拒绝启动，也不要静默读出错误数据——后者是最坏的结果，因为它会污染用户的备份。
 
@@ -371,7 +395,9 @@ SST 元信息本身很小（1 万个 SST 也才 400 KB），而 compaction 触�
 | MANIFEST | magic / version / CRC / 语义 | 拒绝启动 | §4.3.1 |
 | MANIFEST 登记的 SST 不存在 | 读文件失败 | 拒绝启动 | 元信息与实际不一致，不能猜 |
 | SST 的 footer / 结构 | 长度、magic、区域边界 | 拒绝启动 | 同上 |
-| **SST 的 data block 内部** | **无** | **发现不了** | 见下（v1.1 补 block CRC） |
+| SST 的 data block / index block | 尾部 CRC32C（v2） | 拒绝启动 | §3.2 |
+| SST 的 filter block | 尾部 CRC32C（v2） | 拒绝启动 | §3.3 |
+| SST footer 的 `smallest_seq` | 无 | 发现不了（8 字节，不参与定位） | §3.5 |
 
 **为什么 WAL 中间坏了要截断、而不是跳过那一条继续读。**
 
@@ -383,16 +409,29 @@ SST 元信息本身很小（1 万个 SST 也才 400 KB），而 compaction 触�
 所以停在一个**确定的位置**（最后一个 CRC 通过的帧之后），把后面的全丢掉。
 调用方能看到 `WalReplay::is_truncated()`，知道「尾巴没了」，而不是被蒙在鼓里。
 
-**为什么 SST 坏在 data block 内部发现不了。**
+**v1 曾经发现不了 data block 内部的损坏，v2 修掉了。**
 
-v1 的 data block 没有 CRC（§3.4 末的说明），只有 footer 的 magic 和
-各区域的边界校验。所以一个落在 block 中间的字节翻转，结构仍然自洽，
-会被静默接受 —— 读出来可能是原值、可能是另一个值。
+v1 的 data block 没有 CRC，只有 footer 的 magic 和各区域的边界校验。
+一个落在 block 中间的字节翻转，结构仍然自洽，会被静默接受 ——
+读出来可能是原值、可能是另一个值。当时量化的代价是：173 字节的 SST
+逐个位置翻转，**42% 被拒绝、58% 被静默接受**。
 
-这不是疏忽，是 v1 的明确取舍（为 48 字节 footer 的对齐省掉一个字段），
-代价已经量化：`corruption_wbtest.mbt` 的 fuzz 用例把一个 173 字节的 SST
-逐个位置翻转，**173 个位置里 73 个被拒绝（42%），58% 被静默接受**。
-v1.1 引入 block CRC 时，这条用例要改成「必须全部发现」。
+v2（ADR-0010）给 data block、index block、filter block 都加了尾部 CRC32C。
+同一条 fuzz 用例现在是 185 个位置里 **177 个被拒绝（95.7%）**，
+剩下 8 个全在 footer 的 `smallest_seq` 上（§3.5 解释了为什么修不了）。
+
+**为什么这条比「多一个字段」重要。** 静默接受损坏的数据，比报错严重得多：
+报错时用户知道自己该恢复备份，静默接受时用户以为数据是对的，一路把坏数据
+带到下游、带到备份、带到下一次迁移。这条判据在 ADR-0006 里写过一次
+（自动决策不能丢已 ack 的数据），这里是它的另一面 ——
+**读路径也不能假装读到了**。
+
+> 补 CRC 时发现的一个细节：读路径原本在 block 解码失败时 `get` 返回 `None`，
+> 也就是「这个 key 不存在」。加上 CRC 之后，这个语义就危险了 ——
+> 明明有 CRC 能证明「我读不懂这个块」，却回答「没有」。
+> 所以 `Db::open` 在加载 SST 时会走一遍 `entries()`（本来就要算 `max_seq`），
+> 校验失败即拒绝启动。**校验发生在打开时，不是读的时候** —— 这样
+> `get` 的返回值里就不会混进「读不懂」这一种情况。
 
 ---
 
@@ -406,7 +445,8 @@ v1.1 引入 block CRC 时，这条用例要改成「必须全部发现」。
 | filter block | ✅ 完成 | `bloom.mbt`（`encode` / `decode_bloom`） |
 | footer | ✅ 完成 | `sstable.mbt` |
 | MANIFEST + CURRENT 原子切换 | ✅ 完成 | `manifest.mbt` + `db.mbt` |
-| data block 级 CRC | ⬜ v1.1（会 bump `version` 到 2） | — |
+| data / index / filter block 级 CRC | ✅ 完成（v2） | `block.mbt` / `bloom.mbt` |
+| footer 自身 CRC | ⬜ v1.2（需要先把 `smallest_seq` 挪走，见 §3.5） | — |
 
 图例：✅ 完成 / 🟡 部分 / ⬜ 未实现
 

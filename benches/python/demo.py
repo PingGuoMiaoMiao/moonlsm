@@ -320,7 +320,7 @@ def main():
     rule("结论")
     print("  写 → WAL(fsync) → memtable → L0 → 归并 → L1 → L2")
     print("  每一步的崩溃点都有明确的恢复路径；kill -9 不丢已 ack 的数据。")
-    print("  单元测试 205 条 · 崩溃测试 20 轮 · 损坏注入 9 条 + 逐字节 fuzz")
+    print("  单元测试 211 条 · 崩溃测试 20 轮 · 损坏注入 9 条 + 逐字节 fuzz")
     print()
     return 0 if missing == 0 and broken == 0 else 1
 

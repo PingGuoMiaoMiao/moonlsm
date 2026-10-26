@@ -167,8 +167,8 @@ sync              →  Storage::sync_file    →  fopen("rb+") … fsync … fcl
 
 - `moonlsm` 0.2.2。单条 `put` 的短板从「6.5 倍」变成「同一量级」，
   `BENCHMARK.md` §2、申报书的「已知短板」同步更新。
-- v1.1 的「WAL 句柄缓存」技术债关闭。剩下的两条（data block CRC、
-  SST footer 存 smallest_key）不动。
+- v1.1 的「WAL 句柄缓存」技术债关闭。当时剩下的两条里，data block CRC
+  已由 ADR-0010 完成（连同 filter block）；SST footer 存 `smallest_key` 仍未动。
 - 新增 7 条 `fs_native_wbtest` 用例，测的不是「快了多少」，而是
   「缓存了句柄之后，原本靠 `fopen`/`fclose` 隐式保证的事情还成不成立」：
   截断 / 删除 / 改名之后追加位置、`fflush` 的可见性、该报错的地方还报错。

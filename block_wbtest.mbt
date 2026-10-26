@@ -118,14 +118,23 @@ test "block: 编码字节逐字节符合格式规范（黄金向量）" {
     // num_restarts = 1（u32 LE）
      0x01, 0x00, 0x00, 0x00,
   ])
-  assert_bytes_eq(b.finish(), want)
+  let got = b.finish()
+  // 前 34 字节是 v1 就有的内容，必须逐字节一致
+  assert_bytes_eq(got[:want.length()].to_owned(), want)
+  // 后面 4 字节是 v2 新增的 CRC32C，覆盖前面全部 34 字节
+  assert_eq(got.length(), want.length() + BLOCK_CRC_SIZE)
+  let crc = match read_fixed32u(got, want.length()) {
+    Some(v) => v
+    None => 0UL
+  }
+  assert_eq(crc, crc32c(want))
 }
 
 ///|
 test "block: 空 block 可解码且查不到任何 key" {
   let raw = BlockBuilder::new().finish()
-  // 只有 restarts[0] = 0 与 num_restarts = 1，共 8 字节
-  assert_eq(raw.length(), 8)
+  // restarts[0] = 0 与 num_restarts = 1 共 8 字节，v2 再加 4 字节 CRC
+  assert_eq(raw.length(), 8 + BLOCK_CRC_SIZE)
   let blk = must_decode(raw)
   assert_eq(blk.num_restarts(), 1)
   assert_eq(blk.entries().length(), 0)
@@ -344,4 +353,58 @@ test "block: entry 区被截断时 entries() 报错而不是返回半截数据" 
       assert_true(failed || blk.entries().length() != 20)
     }
   }
+}
+
+///|
+/// 把第 `at` 个字节换掉，返回新的一份。
+///
+/// `corruption_wbtest.mbt` 里有个同名的 `corrupt_at`，但那个文件有自己的
+/// `bad_byte`；白盒测试的顶层标识符在整个包里共享，所以这里换个名字。
+fn poke_block_byte(b : Bytes, at : Int) -> Bytes {
+  let buf = Buffer::Buffer()
+  buf.write_bytes(b[:at])
+  buf.write_byte(if b[at] == 0x5A { 0x00 } else { 0x5A })
+  buf.write_bytes(b[at + 1:])
+  buf.to_bytes()
+}
+
+///|
+/// **每一个**字节被改坏，`decode_block` 都必须返回 `None`。
+///
+/// 这是 block CRC 的最小证明：不是「改坏某处能发现」，而是「改坏任何一处都能发现」。
+/// 之所以能这么断言，是因为 CRC 覆盖的是整个 block（entry 区 + restart 数组 +
+/// `num_restarts`），没有留下任何不参与校验的字节。
+test "block: 任意单字节损坏都会被 CRC 拦下" {
+  let b = BlockBuilder::new()
+  for i in 0..<40 {
+    b.add(mk("key:" + pad6(i), "value" + i.to_string(), (i + 1).to_uint64()))
+  }
+  let raw = b.finish()
+  assert_true(raw.length() > 100)
+  for at in 0..<raw.length() {
+    assert_true(decode_block(poke_block_byte(raw, at)) is None)
+  }
+}
+
+///|
+/// v1 格式（没有 CRC）的 block 必须还能解出来 —— 否则读老库会全线失败。
+///
+/// 顺带把「v1 与 v2 只差尾部 4 字节」这件事钉住：如果哪天有人在中间插字段，
+/// 这个断言会红，提醒他这已经不是「加个校验」而是「换了格式」。
+test "block: v1 格式（无 CRC）仍可解码，且与 v2 只差尾部 4 字节" {
+  let b = BlockBuilder::new()
+  for i in 0..<20 {
+    b.add(mk("key:" + pad6(i), "value" + i.to_string(), (i + 1).to_uint64()))
+  }
+  let v1 = b.finish_v1()
+  let v2 = b.finish()
+  assert_eq(v2.length(), v1.length() + BLOCK_CRC_SIZE)
+  assert_bytes_eq(v2[:v1.length()].to_owned(), v1)
+  let blk = match decode_block_v1(v1) {
+    Some(x) => x
+    None => fail("v1 block 解不出来")
+  }
+  assert_eq(blk.entries().length(), 20)
+  // 把 v2 的 CRC 摘掉之后，它和 v1 必须是同一份字节
+  assert_true(decode_block(v1) is None)
 }

@@ -241,10 +241,10 @@ test "corruption: WAL 版本号不认识 → 重建空 WAL，不猜格式" {
 /// 恢复路径上遇到坏数据要降级，不能崩）。逐个位置试一遍是最省事的证明方式：
 /// 手工构造「坏在第 37 字节」这种用例，永远只能覆盖到你想得到的地方。
 ///
-/// **已知盲区**：v1 的 data block 没有 CRC（`format.md` §3.4 明确留给 v1.1），
-/// 所以坏在 data block 内部时 `open_sst` 可能照样成功、读出来的值是错的。
-/// 这条用例只保证「不崩」，不保证「能发现」。补 block CRC 时要一并把这里
-/// 改成「必须发现」。
+/// **v2 起它还多管一件事：必须发现。** 加了 block / filter 的 CRC 之后
+/// （ADR-0010），除了一处已知盲区，任何一个字节坏掉都必须让 `Db::open` 拒绝启动。
+/// 剩下那处盲区是 footer 里的 `smallest_seq`（见下面的断言），
+/// 所以这条用例不是「碰巧全绿」，而是把盲区的**位置**也钉住了。
 test "corruption: SST 任意单字节损坏都不 panic（fuzz）" {
   // 先造一个正常的 SST 作为模板
   let st0 = MemStorage::new()
@@ -265,6 +265,7 @@ test "corruption: SST 任意单字节损坏都不 panic（fuzz）" {
   }
   let mut tried = 0
   let mut rejected = 0
+  let missed : Array[Int] = []
   for at in 0..<template.length() {
     let st = MemStorage::new()
     // 摆出一个「完全合法、只有这个 SST 的这一个字节不对」的现场
@@ -287,15 +288,23 @@ test "corruption: SST 任意单字节损坏都不 panic（fuzz）" {
     }
     if !opened {
       rejected = rejected + 1
+    } else {
+      missed.push(at)
     }
   }
   assert_true(tried > 0)
-  // 至少要有一部分位置能被发现。一个都发现不了，说明校验形同虚设；
-  // 全部都能发现，说明这条用例其实在测「结构性损坏」，覆盖不到 data block 内部。
-  //
-  // 实测（2 条 key 的 SST，共 173 字节）：173 个位置里 73 个被拒绝（42%），
-  // 剩下 58% 落在 data block / filter / index 内部 —— 结构没坏、也没有 CRC，
-  // 于是被静默接受。这个比例就是「没有 block CRC」的直接代价。
   assert_true(rejected > 0)
-  assert_true(rejected < tried)
+  // 漏检的位置只允许落在 footer 的 `smallest_seq` 里（48 字节 footer 的第 32..39 字节）。
+  //
+  // 为什么这 8 个字节保护不了：footer 被撑到 52 字节才能塞进自己的 CRC，
+  // 而 48 是读端定位 footer 的硬约束 —— 读端从文件末尾倒推 48 字节，
+  // 这个常量不能随版本变。要修只能把 `smallest_seq` 挪走或换掉，
+  // 属于下一次格式变更（记在 format.md §5.3 的待办里）。
+  //
+  // 影响面：`smallest_seq` 只用于快照读的下界，不参与任何数据定位。
+  // 改坏它的后果是「快照读的下界不准」，而不是「数据读不出来」或「读出错值」。
+  let footer_at = template.length() - SST_FOOTER_SIZE
+  for at in missed {
+    assert_true(at >= footer_at + 32 && at < footer_at + 40)
+  }
 }

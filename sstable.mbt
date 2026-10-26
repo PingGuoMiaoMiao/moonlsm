@@ -17,8 +17,18 @@
 pub const SST_FOOTER_SIZE : Int = 48
 
 ///|
-/// 当前支持的 SST 版本。读到更大的版本必须拒绝打开（§5.2）。
-pub const SST_VERSION : Int = 1
+/// 当前写出的 SST 版本。读到更大的版本必须拒绝打开（§5.2）。
+///
+/// **2** = data block / index block 尾部带 CRC32C（ADR-0010）。
+/// 写端永远写这个版本，读端同时认 1（老库）与 2。
+pub const SST_VERSION : Int = 2
+
+///|
+/// 唯一仍然支持的旧版本：block 没有尾部 CRC。
+///
+/// 留着它是为了「升级不炸库」—— 读到 v1 文件照常能读，
+/// 但**不做内容校验**。下一次 compaction 会把数据重写成 v2。
+pub const SST_VERSION_V1 : Int = 1
 
 ///|
 /// 文件末尾的魔数 `"MSST"`。
@@ -87,6 +97,29 @@ fn encode_handle(offset : Int, size : Int) -> Bytes {
 }
 
 ///|
+/// 按文件版本挑解码器。v2 校验尾部 CRC，v1 不校验。
+///
+/// 把版本判断收在这一处，是为了不让「哪条路径用哪个解码器」散在五个调用点 ——
+/// 漏一处就会把 v1 的 block 当 v2 解，读出来的 `num_restarts` 是 CRC 的字节。
+fn decode_block_ver(raw : Bytes, version : Int) -> Block? {
+  if version >= SST_VERSION {
+    decode_block(raw)
+  } else {
+    decode_block_v1(raw)
+  }
+}
+
+///|
+/// filter 也一样按版本挑解码器（v2 有尾部 CRC）。
+fn decode_bloom_ver(raw : Bytes, version : Int) -> BloomFilter? {
+  if version >= SST_VERSION {
+    decode_bloom(raw)
+  } else {
+    decode_bloom_v1(raw)
+  }
+}
+
+///|
 /// 逐条追加、最后 `finish()` 出整个 SST 字节。
 ///
 /// 使用契约：`add` 的 key 必须**严格升序**（与 `BlockBuilder` 一致）。
@@ -104,10 +137,20 @@ pub struct SstWriter {
   mut block_count : Int
   mut smallest_seq : UInt64
   keys : Array[Bytes]
+  /// 要写出的格式版本。生产路径恒为 `SST_VERSION`；
+  /// 只有兼容性测试会把它设成 `SST_VERSION_V1` 来造老文件。
+  version : Int
 }
 
 ///|
 pub fn SstWriter::new() -> SstWriter {
+  SstWriter::with_version(SST_VERSION)
+}
+
+///|
+/// 按指定版本造 writer。生产路径只有 `new()`（v2）；
+/// 兼容性测试用 `with_version(SST_VERSION_V1)` 造 v1 老文件。
+fn SstWriter::with_version(version : Int) -> SstWriter {
   {
     out: Buffer::Buffer(),
     block: BlockBuilder::new(),
@@ -116,6 +159,7 @@ pub fn SstWriter::new() -> SstWriter {
     block_count: 0,
     smallest_seq: 0xFFFFFFFFFFFFFFFFUL,
     keys: [],
+    version,
   }
 }
 
@@ -151,7 +195,11 @@ fn SstWriter::flush_block(self : SstWriter) -> Unit raise LsmError {
   if self.block.is_empty() {
     return
   }
-  let raw = self.block.finish()
+  let raw = if self.version >= SST_VERSION {
+    self.block.finish()
+  } else {
+    self.block.finish_v1()
+  }
   let offset = self.out.length()
   self.out.write_bytes(raw[:])
   // 注意顺序：last_key 必须在 reset 之前取
@@ -177,10 +225,18 @@ pub fn SstWriter::finish(self : SstWriter) -> Bytes raise LsmError {
   for k in self.keys {
     bloom.put(k)
   }
-  let filter = bloom.encode()
+  let filter = if self.version >= SST_VERSION {
+    bloom.encode()
+  } else {
+    bloom.encode_v1()
+  }
   let filter_offset = self.out.length()
   self.out.write_bytes(filter[:])
-  let index_raw = self.index.finish()
+  let index_raw = if self.version >= SST_VERSION {
+    self.index.finish()
+  } else {
+    self.index.finish_v1()
+  }
   let index_offset = self.out.length()
   self.out.write_bytes(index_raw[:])
   write_fixed64(self.out, filter_offset.to_uint64())
@@ -189,7 +245,7 @@ pub fn SstWriter::finish(self : SstWriter) -> Bytes raise LsmError {
   write_fixed64(self.out, index_raw.length().to_uint64())
   // 空 SST 没有 seq，写 0 而不是 0xFFFF...，避免读端把「未初始化」当真实值
   write_fixed64(self.out, if self.count == 0 { 0UL } else { self.smallest_seq })
-  write_fixed32(self.out, SST_VERSION)
+  write_fixed32(self.out, self.version)
   self.out.write_bytes(SST_MAGIC[:])
   self.out.to_bytes()
 }
@@ -228,7 +284,7 @@ pub fn open_sst(data : Bytes) -> SstReader? {
     Some(v) => v
     None => return None
   }
-  if version != SST_VERSION {
+  if version != SST_VERSION && version != SST_VERSION_V1 {
     // §5.2：读到不认识的版本必须拒绝打开，绝不猜怎么读
     return None
   }
@@ -260,12 +316,12 @@ pub fn open_sst(data : Bytes) -> SstReader? {
     return None
   }
   let filter_raw = data[filter_offset:filter_offset + filter_size].to_owned()
-  let bloom = match decode_bloom(filter_raw) {
+  let bloom = match decode_bloom_ver(filter_raw, version) {
     Some(b) => b
     None => return None
   }
   let index_raw = data[index_offset:index_offset + index_size].to_owned()
-  let index = match decode_block(index_raw) {
+  let index = match decode_block_ver(index_raw, version) {
     Some(b) => b
     None => return None
   }
@@ -285,7 +341,7 @@ pub fn open_sst(data : Bytes) -> SstReader? {
             if off + size > data.length() {
               b""
             } else {
-              match decode_block(data[off:off + size].to_owned()) {
+              match decode_block_ver(data[off:off + size].to_owned(), version) {
                 Some(b) =>
                   match b.first() {
                     Some(e) => e.key
@@ -379,7 +435,7 @@ pub fn SstReader::get_hashed(
   if off + size > self.data.length() {
     return None
   }
-  let blk = match decode_block(self.data[off:off + size].to_owned()) {
+  let blk = match decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
     Some(b) => b
     None => return None
   }
@@ -401,7 +457,7 @@ pub fn SstReader::entries(self : SstReader) -> Array[Entry] raise LsmError {
     if off + size > self.data.length() {
       raise LsmError::corruption("sst: data block 越界")
     }
-    let blk = match decode_block(self.data[off:off + size].to_owned()) {
+    let blk = match decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
       Some(b) => b
       None => raise LsmError::corruption("sst: data block 解码失败")
     }
@@ -474,7 +530,7 @@ pub fn SstReader::scan_range(
     if off + size > self.data.length() {
       raise LsmError::corruption("sst: data block 越界")
     }
-    let blk = match decode_block(self.data[off:off + size].to_owned()) {
+    let blk = match decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
       Some(b) => b
       None => raise LsmError::corruption("sst: data block 解码失败")
     }

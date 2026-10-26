@@ -105,7 +105,7 @@ test "sst: footer 各区域首尾相接" {
   // 布局必须是 data* | filter | index | footer，不能有缝隙也不能重叠
   assert_eq(f.index_offset, f.filter_offset + f.filter_size)
   assert_eq(f.index_offset + f.index_size + SST_FOOTER_SIZE, raw.length())
-  assert_eq(f.version, 1)
+  assert_eq(f.version, SST_VERSION)
   assert_eq(f.smallest_seq, 1UL)
 }
 
@@ -171,11 +171,11 @@ test "sst: 坏文件一律返回 None 而不是 panic" {
   bm.write_bytes(bad_magic[:])
   bm.write_bytes(b"XXXX"[:])
   assert_true(open_sst(bm.to_bytes()) is None)
-  // version 被改成不认识的 2
+  // version 被改成不认识的 3（1 与 2 都是认识的）
   let bad_ver = raw[:raw.length() - 8].to_owned()
   let bv = Buffer::Buffer()
   bv.write_bytes(bad_ver[:])
-  write_fixed32(bv, 2)
+  write_fixed32(bv, 3)
   bv.write_bytes(b"MSST"[:])
   assert_true(open_sst(bv.to_bytes()) is None)
   // 文件被截断（footer 位置整体错位）
@@ -369,4 +369,63 @@ test "sst: 区间不相交时 scan_range 返回空" {
   assert_eq(empty.length(), 0)
   let empty2 = r.scan_range(@utf8.encode("zzz"), @utf8.encode("zzz~"))
   assert_eq(empty2.length(), 0)
+}
+
+///|
+/// 写 `n` 条同样内容的 **v1 格式** SST（block 没有尾部 CRC）。
+///
+/// 这里直接调 `with_version` 而不是 `new()`：只有白盒测试需要造老格式，
+/// 生产路径不该有一个「写出旧格式」的开关 —— 那种开关迟早会被人手滑用上。
+fn build_sst_v1(n : Int) -> Bytes raise {
+  let w = SstWriter::with_version(SST_VERSION_V1)
+  for i in 0..<n {
+    w.add(mk("key:" + pad6(i), "value:" + i.to_string(), (i + 1).to_uint64()))
+  }
+  w.finish()
+}
+
+///|
+/// **升级不炸库**：v2 的写端上线之后，磁盘上已有的 v1 文件必须还能读。
+///
+/// 这条测试的价值不在于「多读了一种格式」，而在于它把「版本字段」这个
+/// 设计从纸面变成了约束：如果哪天有人把 `open_sst` 的版本检查收紧成
+/// `version != SST_VERSION`，老库会**整体打不开**，而这条测试会立刻红。
+test "sst: v1 格式的老文件仍能打开且内容一致" {
+  let v1 = build_sst_v1(300)
+  let v2 = build_sst(300)
+  let r1 = must_open(v1)
+  let r2 = must_open(v2)
+  assert_eq(r1.footer().version, 1)
+  assert_eq(r2.footer().version, 2)
+  // 每块多 4 字节 CRC，块数一样但总长必然更长
+  assert_eq(r1.block_count(), r2.block_count())
+  assert_true(v1.length() < v2.length())
+  // 内容必须逐条相同
+  let e1 = r1.entries()
+  let e2 = r2.entries()
+  assert_eq(e1.length(), 300)
+  assert_eq(e2.length(), 300)
+  for i in 0..<300 {
+    assert_eq(compare_bytes(e1[i].key, e2[i].key), 0)
+    assert_eq(compare_bytes(e1[i].value, e2[i].value), 0)
+    assert_eq(e1[i].seq, e2[i].seq)
+  }
+  // 点查与扫描也要走通（它们和 entries 走的是不同的 block 解码入口）
+  let k = @utf8.encode("key:000123")
+  assert_true(r1.get(k) is Some(_))
+  let scanned = r1.scan_range(@utf8.encode("key:000100"), @utf8.encode("key:000110"))
+  assert_eq(scanned.length(), 10)
+}
+
+///|
+/// 版本 3（未来格式）必须被拒绝，不能猜着读。
+test "sst: 不认识的版本必须拒绝打开" {
+  let raw = build_sst(50)
+  // footer 的 version 字段在倒数第 8..4 字节（前面是 4 字节 magic）
+  let n = raw.length()
+  let buf = Buffer::Buffer()
+  buf.write_bytes(raw[:n - 8])
+  write_fixed32(buf, 3)
+  buf.write_bytes(raw[n - 4:])
+  assert_true(open_sst(buf.to_bytes()) is None)
 }

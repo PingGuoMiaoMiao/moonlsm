@@ -11,6 +11,72 @@
 
 ---
 
+## [0.3.0] - 2026-10-26
+
+**磁盘格式版。** 给 SST 里的 data block、index block、filter block 各加了
+4 字节尾部 CRC32C，`version` 从 1 升到 2（ADR-0010）。
+
+这一版修的不是性能，是**正确性**：v1 的 SST 只有 footer 的 magic 和区域边界检查，
+block 内部没有校验。一个落在 block 中间的字节翻转，结构仍然自洽，
+会被静默接受 —— 读出来可能是原值，也可能是别的值，而引擎自己不知道。
+
+代价早就量化过：把一个 173 字节的 SST 逐个位置翻转，42% 被拒绝、**58% 被静默接受**。
+现在是 185 个位置里 **177 个被拒绝（95.7%）**，剩下 8 个全在 footer 的
+`smallest_seq` 上（48 字节 footer 里没地方再塞一个 CRC，见 `format.md` §3.5）。
+
+**BREAKING（磁盘格式）**：新写的 SST 一律是 `version = 2`。
+读端同时认 1 和 2，**0.2.x 建的库不需要迁移工具**，直接能开；
+这些老文件在下一次 compaction 之前仍然带着原来的盲区（CRC 是格式自带的，
+老文件里没有）。降级到 0.2.x 读 0.3.0 写出的库则**不行** ——
+`version > 当前支持` 会按 `format.md` §5.2 拒绝启动。
+
+### 改动
+
+- **data block / index block**：尾部加 `crc32c`，覆盖 entry 区 + restart 数组 +
+  `num_restarts`。校验范围含结构区，因为 `num_restarts` 被改成「仍能通过边界检查
+  的值」时，读端会把 entry 区当 restart 数组读，这种损坏结构检查永远抓不到
+- **filter block**：尾部加 `crc32c`。filter 看起来只是加速用的，但位图被改坏时
+  `may_contain` 会返回 `false`，于是引擎理直气壮地回答「没有这个 key」——
+  这是整个存储栈里唯一一种会**主动丢数据**的损坏方向。加 CRC 之前，
+  fuzz 显示 filter 区域 80 个位置**全部漏检**，是整份文件里最大的一块盲区
+- **校验时机在打开时，不在读 key 时**：`Db::get` 返回 `Bytes?`，无法表达
+  「这个块我读不懂」。有了 CRC 之后，读时才发现损坏就只能回答 `None`，
+  也就是对用户撒谎说「没有」。`Db::open` 本来就要遍历每个 SST 的 `entries()`
+  算 `max_seq`，顺路校验，任一 block 失败即拒绝启动
+- **读端双版本**：`decode_block` / `decode_block_v1`、`decode_bloom` /
+  `decode_bloom_v1`，按 footer 的 `version` 分派，判断收在
+  `decode_block_ver` / `decode_bloom_ver` 两个函数里，不散在五个调用点
+- **footer 仍然没有 CRC**，并且现在是唯一没被覆盖的地方。理由不是「不重要」，
+  是「没地方」：读端从文件末尾倒推 48 字节定位 footer，这个常量不能随版本变，
+  否则得先知道版本才能算 footer 在哪，而版本就在 footer 里
+
+### 测试
+
+211 条（+6），native 全绿；wasm-gc / js 根包全绿；三后端 `check` 零警告。
+
+- `block_wbtest.mbt`「任意单字节损坏都会被 CRC 拦下」：逐字节改坏，
+  `decode_block` 必须全返回 `None`
+- `block_wbtest.mbt`「v1 格式（无 CRC）仍可解码，且与 v2 只差尾部 4 字节」
+- `bloom_wbtest.mbt` 两条：同样的逐字节校验，以及 v1 filter 的兼容
+- `sstable_wbtest.mbt`「v1 格式的老文件仍能打开且内容一致」：
+  造一份 v1 SST，逐条比对 key / value / seq，点查与扫描也各走一遍
+- `sstable_wbtest.mbt`「不认识的版本必须拒绝打开」：版本改成 3 必须被拒
+- `corruption_wbtest.mbt` fuzz 改了断言方式：原来只断言「不 panic」，
+  现在断言「**必须发现**」，并且把漏检位置的**范围**钉死
+  （必须落在 footer 的 `smallest_seq` 区间）。以后谁删了某个 CRC，
+  这条用例会红，并且直接指出漏在哪
+
+### 文档
+
+- 新增 `docs/adr/0010-block-and-filter-crc.md`，含「为什么校验在 open 时」
+  和「为什么 footer 加不了」两条推导，以及 6 条否决过的备选方案
+- `docs/design/format.md`：§3.2 / §3.3 补 CRC 布局，§3.5 重写 footer 那段
+  （从「这是有意识的取舍」改成「这是唯一剩下的盲区，以及为什么修不了」），
+  §5.2 版本演进表补 `1 → 2` 这个先例，§5.3 损坏处理总表重写，§6 待实现清单更新
+- `docs/README.md`：ADR 表补上 0009 与 0010（0009 之前漏登记了）
+
+---
+
 ## [0.2.2] - 2026-10-26
 
 **写路径的性能版。** 0.2.1 之后单条 `put` 还是 76 ops/s（13.2 ms/条），

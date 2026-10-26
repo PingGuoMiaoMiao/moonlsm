@@ -108,9 +108,9 @@ test "bloom: 内存表示就是磁盘表示" {
   // num_bits 是 8 的倍数，位图字节数 = num_bits/8
   assert_eq(f.num_bits % 8, 0)
   let encoded = f.encode()
-  // 1 字节 k + varint(num_bits) + 位图
+  // 1 字节 k + varint(num_bits) + 位图 + 4 字节 CRC（v2）
   let varint_len = if f.num_bits < 128 { 1 } else if f.num_bits < 16384 { 2 } else { 3 }
-  assert_eq(encoded.length(), 1 + varint_len + f.num_bits / 8)
+  assert_eq(encoded.length(), 1 + varint_len + f.num_bits / 8 + 4)
   // 编码出来的字节里，位图段与内存逐字节相同
   let body = encoded[1 + varint_len:]
   for i in 0..<(f.num_bits / 8) {
@@ -223,4 +223,45 @@ test "bloom: 位全满时全部命中" {
   for k in make_keys("never:", 500) {
     assert_true(f.may_contain(k))
   }
+}
+
+///|
+/// **filter 的损坏方向最危险**：位图被改坏时 `may_contain` 会返回 `false`，
+/// 于是「数据明明在，却查不到」—— 引擎会理直气壮地报「没有这个 key」。
+/// 所以 filter 也必须逐个字节可检。
+test "bloom: 任意单字节损坏都会被 CRC 拦下" {
+  let f = BloomFilter::new_with(200, 10, 7)
+  for k in make_keys("k:", 200) {
+    f.put(k)
+  }
+  let raw = f.encode()
+  for at in 0..<raw.length() {
+    let buf = Buffer::Buffer()
+    buf.write_bytes(raw[:at])
+    buf.write_byte(if raw[at] == 0x5A { 0x00 } else { 0x5A })
+    buf.write_bytes(raw[at + 1:])
+    assert_true(decode_bloom(buf.to_bytes()) is None)
+  }
+}
+
+///|
+/// v1 的 filter（没有尾部 CRC）仍要能解，且与 v2 只差尾部 4 字节。
+test "bloom: v1 格式（无 CRC）仍可解码" {
+  let f = BloomFilter::new_with(100, 10, 7)
+  for k in make_keys("k:", 100) {
+    f.put(k)
+  }
+  let v2 = f.encode()
+  let v1 = v2[:v2.length() - 4].to_owned()
+  let back = match decode_bloom_v1(v1) {
+    Some(b) => b
+    None => fail("v1 filter 解不出来")
+  }
+  assert_eq(back.num_bits, f.num_bits)
+  assert_eq(back.k, f.k)
+  for k in make_keys("k:", 100) {
+    assert_true(back.may_contain(k))
+  }
+  // 少了 CRC 的字节喂给 v2 解码器，必须被拒
+  assert_true(decode_bloom(v1) is None)
 }

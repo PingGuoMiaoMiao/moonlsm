@@ -4,8 +4,11 @@
 /// 磁盘布局见 `docs/design/format.md` §3.2：
 /// ```
 /// entry: [type:1][seq:varint64][shared:v32][non_shared:v32][value_len:v32][key_delta][value]
-/// 尾部:  [restart_offset:u32 LE] * n  [num_restarts:u32 LE]
+/// 尾部:  [restart_offset:u32 LE] * n  [num_restarts:u32 LE]  [crc32c:u32 LE]
 /// ```
+///
+/// 末尾 4 字节 CRC 是**格式版本 2** 引入的（ADR-0010）。版本 1 的 block
+/// 没有这个字段，靠 `decode_block_v1` 读 —— 升级不能炸掉老库。
 ///
 /// **为什么值得做前缀压缩**：SST 里的 key 通常高度相似（`user:1000`、
 /// `user:1001`……），前缀压缩能把 key 部分压掉一半以上。而 restart point
@@ -22,6 +25,14 @@ const RESTART_INTERVAL : Int = 16
 /// 4 KiB 是 LevelDB / RocksDB 的默认值，也是「一次读放大」与
 /// 「索引条目数」之间的平衡点。
 pub const BLOCK_TARGET_SIZE : Int = 4096
+
+///|
+/// block 尾部 CRC 的长度（v2 起）。校验范围是**它之前的所有字节** ——
+/// entry 区、restart 数组、`num_restarts` 全在里面。
+///
+/// 只保护 entry 区是不够的：`num_restarts` 被改成一个仍然能通过边界检查的值时，
+/// 读端会把 entry 区当 restart 数组读，得到一个「结构合法但内容错乱」的 block。
+pub const BLOCK_CRC_SIZE : Int = 4
 
 ///|
 /// 解码过程中间态：比 `Entry` 多一个 `next`，
@@ -87,11 +98,11 @@ pub fn BlockBuilder::is_empty(self : BlockBuilder) -> Bool {
 }
 
 ///|
-/// 估算编码后的字节数（含 restart 数组与计数），用于判断是否该切块。
+/// 估算编码后的字节数（含 restart 数组、计数与 CRC），用于判断是否该切块。
 /// 估算而不是精确值：restart 数组长度依赖 counter，这里按当前状态算，
 /// 差几个字节不影响「是否超过 4 KiB」的判断。
 pub fn BlockBuilder::estimated_size(self : BlockBuilder) -> Int {
-  self.buf.length() + self.restarts.length() * 4 + 4
+  self.buf.length() + self.restarts.length() * 4 + 8
 }
 
 ///|
@@ -132,17 +143,44 @@ pub fn BlockBuilder::add(
 }
 
 ///|
-/// 产出完整 block 字节（entry 区 + restart 数组 + 计数）。
+/// 产出完整 block 字节（entry 区 + restart 数组 + 计数 + CRC）。
 ///
 /// 每次调用都基于当前状态重新拼装，**不修改 builder 自身**，
 /// 所以可以在不 `reset` 的情况下多次调用（拿到的内容相同）。
 pub fn BlockBuilder::finish(self : BlockBuilder) -> Bytes {
-  let out = Buffer::Buffer()
-  out.write_bytes(self.buf.to_bytes()[:])
+  self.assemble(true)
+}
+
+///|
+/// 产出**格式版本 1** 的 block 字节（没有尾部 CRC）。
+///
+/// 存在的唯一理由是兼容性测试：要证明「读到 v1 的老文件仍然能正确打开」，
+/// 就必须能造出 v1 的字节。生产路径永远不会调用它 ——
+/// `SstWriter` 写的一律是 v2。
+fn BlockBuilder::finish_v1(self : BlockBuilder) -> Bytes {
+  self.assemble(false)
+}
+
+///|
+/// 拼装 block。`with_crc` 决定尾部是否带 CRC。
+///
+/// CRC 覆盖「拼装到 CRC 之前」的全部字节，而不是只覆盖 entry 区：
+/// restart 数组与 `num_restarts` 同样是读端解析的依据，
+/// 它们坏掉一样会让解码器读到错位置。
+fn BlockBuilder::assemble(self : BlockBuilder, with_crc : Bool) -> Bytes {
+  let body = Buffer::Buffer()
+  body.write_bytes(self.buf.to_bytes()[:])
   for i in 0..<self.restarts.length() {
-    write_fixed32(out, self.restarts[i])
+    write_fixed32(body, self.restarts[i])
   }
-  write_fixed32(out, self.restarts.length())
+  write_fixed32(body, self.restarts.length())
+  let raw = body.to_bytes()
+  if !with_crc {
+    return raw
+  }
+  let out = Buffer::Buffer()
+  out.write_bytes(raw[:])
+  write_fixed32u(out, crc32c(raw))
   out.to_bytes()
 }
 
@@ -167,18 +205,53 @@ pub struct Block {
 }
 
 ///|
-/// 解析 block 的尾部结构。任何结构性问题都返回 `None`。
+/// 解析一个**格式版本 2** 的 block：先校验尾部 CRC，再解析结构。
+///
+/// 校验顺序是「CRC 在前，结构在后」，因为 CRC 是唯一的**内容**校验。
+/// 先跑结构检查会让「结构碰巧仍然合法、内容已经错了」的损坏漏过去 ——
+/// 那正是没有 CRC 时 58% 的静默接受是怎么来的。
+///
+/// 返回 `None` 的两种情形（CRC 不符 / 结构不合法）在读端是同一个后果：
+/// 这个 block 不可信。调用方一律当损坏处理，不去猜。
+pub fn decode_block(raw : Bytes) -> Block? {
+  let n = raw.length()
+  if n < BLOCK_CRC_SIZE + 4 {
+    return None
+  }
+  let body_len = n - BLOCK_CRC_SIZE
+  let want = match read_fixed32u(raw, body_len) {
+    Some(v) => v
+    None => return None
+  }
+  if crc32c(raw[:body_len].to_owned()) != want {
+    return None
+  }
+  parse_block(raw, body_len)
+}
+
+///|
+/// 解析一个**格式版本 1** 的 block（尾部没有 CRC，只有 `num_restarts`）。
+///
+/// 只在读 v1 文件时走这条路（ADR-0010）。它**不做任何内容校验** ——
+/// 这正是 v1 的已知短板，保留它是为了能读老库，不是为了继续用。
+pub fn decode_block_v1(raw : Bytes) -> Block? {
+  parse_block(raw, raw.length())
+}
+
+///|
+/// 结构解析：`end` 指向「`num_restarts` 字段结束」的位置。
+/// v2 传 `n - 4`（跳过 CRC），v1 传 `n`。
 ///
 /// 注意这里**只校验结构，不校验内容** —— entry 区的内容是惰性解码的，
 /// 只有真正访问到坏 entry 时才会暴露。这是有意的：
 /// 全量预解码会让「读一个 key」退化成「扫整个 block」，
 /// 而 LSM 的读路径最忌讳这个。
-pub fn decode_block(raw : Bytes) -> Block? {
-  let n = raw.length()
-  if n < 4 {
+/// v2 之所以还敢这么懒，是因为 CRC 已经在入口处把「内容被改坏」拦掉了。
+fn parse_block(raw : Bytes, end : Int) -> Block? {
+  if end < 4 {
     return None
   }
-  let num_restarts = match read_fixed32(raw, n - 4) {
+  let num_restarts = match read_fixed32(raw, end - 4) {
     Some(v) => v
     None => return None
   }
@@ -186,7 +259,7 @@ pub fn decode_block(raw : Bytes) -> Block? {
   if num_restarts < 1 {
     return None
   }
-  let restarts_start = n - 4 - num_restarts * 4
+  let restarts_start = end - 4 - num_restarts * 4
   if restarts_start < 0 {
     return None
   }

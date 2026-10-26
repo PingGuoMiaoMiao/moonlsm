@@ -283,7 +283,10 @@ D2 的产出不只是测试，还有一张**损坏处理总表**（`format.md` �
 MANIFEST / SST 坏了拒绝启动（它们是已 ack 数据的唯一载体）。
 
 同时把「没有 block CRC」这个取舍量化了：173 字节的 SST 逐个位置翻转，
-42% 被拒绝、58% 被静默接受。这个数字比一句「暂不支持」有用得多。
+42% 被拒绝、58% 被静默接受。这个数字比一句「暂不支持」有用得多 ——
+**0.3.0 就是照它做的**：给 data / index / filter block 都加了 CRC32C（ADR-0010），
+同一条 fuzz 用例现在是 185 个位置里 177 个被拒绝（95.7%），
+剩下 8 个位置全在 footer 的 `smallest_seq` 上。
 
 D4 的结论和原计划不一样。计划里写的是「bloom 调参」，
 但量下来发现**参数本来就是对的**（10 bit / 7 哈希，实测误判率 0.830%，
@@ -363,24 +366,27 @@ python bench.py --n 1000000
 
 ## 8. 里程碑进度
 
-### M0 · 工程骨架（✅ 已完成）
+三个阶段（Week 1 能跑 → Week 2 能活 → Week 3 能拿奖）全部走完，
+当前在 mooncakes 上是 **0.3.0**。逐日状态见上面各周的表，
+这一节只留「现在到哪了」和「还欠什么」。
 
-- [x] 模块改名 `lsm` → `moonlsm`，`moon.mod` 补齐 license / keywords / repository
-- [x] `README.md` 重写为真实文件（首屏六块 + 能力矩阵 + 明确不做什么）
-- [x] `README.mbt.md` 精简为 mooncakes 文档页短版
-- [x] 测试脚手架从工作区根目录迁入 `benches/python/`
-- [x] `cmd/dbcli` 协议壳（8 命令 + 每行 flush），内存 Map 占位
-- [x] `model_check.py` 在 6 个随机种子下 PASS
-- [x] `docs/design/format.md`（已冻结）+ 3 条 ADR
-- [ ] CHANGELOG / SECURITY / CONTRIBUTING
-- [ ] GitHub Actions CI + crash workflow
-- [ ] issue / PR 模板 + 首次 commit
+| 里程碑 | 内容 | 状态 |
+|---|---|---|
+| M0 工程骨架 | 模块元信息、README、协议壳、格式冻结 | ✅ |
+| M1 读写路径 | MemTable → block → SST → WAL → `Db` 全链路 | ✅ |
+| M2 能活下来 | WAL 截断恢复、MANIFEST 原子切换、三层归并 | ✅ |
+| M3 能拿奖 | 崩溃测试、损坏注入、性能、文档、发布、申报 | ✅ |
+| M4 交付 | 录 90 秒 demo 旁白（需本人出声） | 🟡 |
 
-### 下一步（Week 1 D1）
+### 还欠什么
 
-1. 清掉模板遗留的 `lsm.mbt` / `lsm_test.mbt`（占位代码）
-2. 按 `docs/design/format.md` §3.2 写 `block.mbt`，前缀压缩编解码往返测试
-3. `moon test` 全绿后进 `sstable.mbt`
+| 项 | 说明 | 归属 |
+|---|---|---|
+| demo 旁白 | 素材与提词器就位（`docs/engineering/DEMO.md` + `prompter.html`），只差录音 | 本人 |
+| SST footer 存 `smallest_key` | 让 `SstReader` 单独打开时不必解首块就能拿到下界 | v1.2 |
+| footer 自身 CRC | 要先把 `smallest_seq` 挪进 MANIFEST 腾位置，见 `format.md` §3.5 | v1.2 |
+| 流式扫描游标 | `Db::scan` 现在是「整段读进数组再归并」，是范围扫描慢一个数量级的根因 | v1.2 |
+| block size 调参 | 4 KiB 与 LevelDB 一致，但没做过对照实验，不宣称它是最优 | 待量化 |
 
 > 提示：本机 MoonBit 版本 `0.1.20260827`。语法细节以 `moon check` 的报错为准，别信记忆——
 > 比如 `typealias` 在这个版本已废弃，要用 `type Alias = Type`；
