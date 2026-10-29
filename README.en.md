@@ -271,6 +271,8 @@ locating each bottleneck, is in
 | ✅ v0.2.1 | Read-path optimization: bit-packed bloom, single-pass hashing, file-level key-range pruning (miss P50 −41%, scan 3.6×) |
 | ✅ v0.2.2 | Write-path optimization: persistent WAL handle, single `put` 76 → 390 ops/s (6.3× same-session) |
 | ✅ v0.3.0 | On-disk format v2: CRC32C on data / index / filter blocks, single-byte corruption detection 42% → 95.7% (ADR-0010) |
+| ✅ v0.3.1 | Toolchain: moonc v0.10.18 (requires ≥ 0.10.16), `Int` → `Int32` in 197 places |
+| ✅ v0.3.2 | Read path: block-level lazy cursor, 53× faster on wide-range small-limit scans (ADR-0011) |
 | v0.4.0 | Observable: stats/metrics, reproducible benchmarks |
 | v0.5.0 | API frozen: semantic-versioning commitment, migration guide |
 | v1.0.0 | Product: multi-backend abstraction, performance regression gates, external users |

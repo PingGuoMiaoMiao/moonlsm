@@ -392,7 +392,7 @@ Pebble / LevelDB / Badger→  你的质检员，只抄测试和格式
 ### 正确性
 
 - [ ] `moon check --deny-warn` 退出码 0，零警告
-- [ ] `moon test` 全绿（当前 211 条），三后端分别跑过
+- [ ] `moon test` 全绿（当前 215 条），三后端分别跑过
 - [ ] `probe_persistence.py` 退出码 0
 - [ ] `model_check.py --ops 2000 --restart-every 500` 错误 0
 - [ ] `crash_test.py --rounds 20` 通过 20/20

@@ -74,6 +74,7 @@
 | [0008](adr/0008-bloom-layout-and-file-range-pruning.md) | bloom 布局与文件级剪枝 | 参数本来就最优，错的是「一次未命中要探 77 个文件」 |
 | [0009](adr/0009-cached-wal-handle.md) | 常开一个追加句柄 | 单条 `put` 的成本全在「每条写开关两次文件」上，不在 `fsync` 上 |
 | [0010](adr/0010-block-and-filter-crc.md) | block / filter 加 CRC，格式升到 v2 | filter 坏了会**主动丢数据**；校验必须在打开时做，因为 `get` 无法表达「读不懂」 |
+| [0011](adr/0011-lazy-scan-cursor.md) | 范围扫描改成块级惰性游标 | `limit` 只在归并之后生效，等于「取 10 条也要解 10 万条」；剪枝必须前置到归并器之外 |
 
 ### 读 ADR 的正确姿势
 

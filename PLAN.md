@@ -367,7 +367,7 @@ python bench.py --n 1000000
 ## 8. 里程碑进度
 
 三个阶段（Week 1 能跑 → Week 2 能活 → Week 3 能拿奖）全部走完，
-当前在 mooncakes 上是 **0.3.0**。逐日状态见上面各周的表，
+当前在 mooncakes 上是 **0.3.2**。逐日状态见上面各周的表，
 这一节只留「现在到哪了」和「还欠什么」。
 
 | 里程碑 | 内容 | 状态 |
@@ -385,8 +385,16 @@ python bench.py --n 1000000
 | demo 旁白 | 素材与提词器就位（`docs/engineering/DEMO.md` + `prompter.html`），只差录音 | 本人 |
 | SST footer 存 `smallest_key` | 让 `SstReader` 单独打开时不必解首块就能拿到下界 | v1.2 |
 | footer 自身 CRC | 要先把 `smallest_seq` 挪进 MANIFEST 腾位置，见 `format.md` §3.5 | v1.2 |
-| 流式扫描游标 | `Db::scan` 现在是「整段读进数组再归并」，是范围扫描慢一个数量级的根因 | v1.2 |
+| 归并器 per-row 常数 | 惰性游标让 `peek` 比数组下标贵一点，窄区间可能慢几个百分点（噪声内）。缓存头部 key 可以消掉，但要加一层状态 | v1.3 |
 | block size 调参 | 4 KiB 与 LevelDB 一致，但没做过对照实验，不宣称它是最优 | 待量化 |
+
+### 已关闭
+
+| 项 | 关在 |
+|---|---|
+| 单条 `put` 76 ops/s | 0.2.2，ADR-0009（常开 WAL 句柄） |
+| data block 无校验，58% 损坏静默接受 | 0.3.0，ADR-0010（block / filter CRC32C） |
+| 流式扫描游标 | 0.3.2，ADR-0011（块级惰性游标，宽区间小 limit 53×） |
 
 > 提示：本机 MoonBit 版本已升到 `0.1.20261028`（moonc v0.10.18，要求 ≥ 0.10.16）。
 > 语法细节以 `moon check` 的报错为准，别信记忆——

@@ -17,9 +17,9 @@ MoonBit 目前已有的键值存储都是 Bitcask 风格——一个追加文件
 
 （说明：这里的「嵌入式」是 *embedded database* 的语义——像 SQLite 那样**链接进宿主进程**，相对 client-server 而言；不是「跑在单片机 / MCU 上」。它依赖 libc 与带 `fsync` 语义的文件系统，这一点在 README 的「明确不做」里写明了。）
 
-项目把重心放在**崩溃一致性**上，而不是功能数量：写入先落 WAL、`fsync` 成功之后才返回，进程被 `kill -9` 之后，已经确认的写入逐条读回来一条不丢。这条契约被拆成五层可验收的关卡和 211 条测试，而不是一句承诺。
+项目把重心放在**崩溃一致性**上，而不是功能数量：写入先落 WAL、`fsync` 成功之后才返回，进程被 `kill -9` 之后，已经确认的写入逐条读回来一条不丢。这条契约被拆成五层可验收的关卡和 215 条测试，而不是一句承诺。
 
-当前版本 v0.3.0 已发布到 mooncakes（`moon add PingGuoMiaoMiao/moonlsm` 解析到该版本），`native` / `wasm-gc` / `js` 三个后端分别构建通过，CI 在 Ubuntu / macOS / Windows 三平台全绿。
+当前版本 v0.3.1 已发布到 mooncakes（`moon add PingGuoMiaoMiao/moonlsm` 解析到该版本），`native` / `wasm-gc` / `js` 三个后端分别构建通过，CI 在 Ubuntu / macOS / Windows 三平台全绿。
 
 ## 核心功能范围
 
@@ -33,7 +33,7 @@ MoonBit 目前已有的键值存储都是 Bitcask 风格——一个追加文件
 - 提供文件级 key 区间剪枝与 Bloom filter 快速否定：一次未命中不再探全部 77 个文件；
 - 提供 CLI `dbcli`（行 JSON 协议）与四套外部测试驱动：持久化探测、随机对拍、崩溃测试、性能基准；
 - 提供崩溃契约 C1–C5（已确认必不丢 / 未确认可丢 / 绝不读半条 / 绝不静默丢 / 前缀一致），每条对应到具体测试；
-- 提供 211 条单元测试（native）/ 186 条（`wasm-gc`、`js` 根包），另有 20 轮 `kill -9`、5000 步随机对拍、9 条损坏注入与逐字节 fuzz；
+- 提供 215 条单元测试（native）/ 190 条（`wasm-gc`、`js` 根包），另有 20 轮 `kill -9`、5000 步随机对拍、9 条损坏注入与逐字节 fuzz；
 - 提供 10 篇 ADR、中英双语 README、磁盘格式契约（`docs/design/format.md`）、五关验收手册与基准报告；
 - 提供 README 示例，覆盖建库读写、范围扫描、崩溃恢复验证与三后端构建。
 

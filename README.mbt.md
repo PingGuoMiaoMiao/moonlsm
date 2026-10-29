@@ -12,7 +12,7 @@ MoonBit 现有的 KV 存储都是 Bitcask 风格（追加文件 + 全量内存�
 ## 状态
 
 可用。`kill -9` 不丢已确认的写入（`crash_test.py --rounds 20` 全 20 轮通过），
-211 条单元测试覆盖 WAL 截断恢复、MANIFEST 原子切换、三层归并、损坏注入。
+215 条单元测试覆盖 WAL 截断恢复、MANIFEST 原子切换、三层归并、损坏注入。
 
 ## 设计
 

@@ -15,7 +15,7 @@
 | 4 | README 说明目标/安装/使用/示例，可复现 | ✅ | 273 行、10 节，每条命令都贴了期望输出 |
 | 5 | CI 覆盖检查、构建、测试 | ✅ | 3 个 job：工具链门禁 + 3 OS × (check, test) + 4 组构建 |
 | 6 | 至少一个可运行示例 | ✅ | `examples/basic`，`moon run examples/basic` 四步输出 |
-| 7 | 完整测试覆盖核心功能路径 | ✅ | **211 条**，15 个测试文件，逐模块对应 |
+| 7 | 完整测试覆盖核心功能路径 | ✅ | **215 条**，15 个测试文件，逐模块对应 |
 | 8 | 发布到 mooncakes.io | ✅ | `PingGuoMiaoMiao/moonlsm@0.3.1` |
 | 9 | OSI 认可的开源许可证 | ✅ | MIT（`LICENSE`，GitHub 识别为 `MIT License`） |
 
@@ -186,7 +186,7 @@ moon run examples/basic
 
 ## 7. 完整测试覆盖核心功能路径
 
-**211 条**（`moon test` 一次跑完），15 个测试文件，**逐模块一一对应**：
+**215 条**（`moon test` 一次跑完），15 个测试文件，**逐模块一一对应**：
 
 | 测试文件 | 条数 | 覆盖什么 |
 |---|---:|---|
@@ -195,7 +195,7 @@ moon run examples/basic
 | `types_wbtest.mbt` | 4 | `Bytes` 二进制比较（不能按长度优先） |
 | `block_wbtest.mbt` | 14 | 前缀压缩编解码、restart 点、**任意单字节损坏必被 CRC 拦下**、v1 兼容 |
 | `bloom_wbtest.mbt` | 14 | 无假阴性、假阳性率、**任意单字节损坏必被拦下**、v1 兼容 |
-| `sstable_wbtest.mbt` | 19 | 读写往返、点查、范围扫描、v1 老文件仍可读、不认识的版本必须拒绝 |
+| `sstable_wbtest.mbt` | 23 | 读写往返、点查、范围扫描、v1 老文件仍可读、不认识的版本必须拒绝、**游标惰性与逐条一致** |
 | `memtable_wbtest.mbt` | 10 | 有序性、覆盖写、墓碑、内存估算 |
 | `iter_wbtest.mbt` | 7 | 归并顺序、同 key 取高 seq、边界 |
 | `wal_wbtest.mbt` | 10 | 帧格式、截断恢复、半条帧丢弃、CRC |
@@ -218,7 +218,7 @@ python crash_test.py --rounds 10
 - `model_check`：随机 2000 步与内存模型对拍，中途重启 2 次，**0 错**
 - `crash_test`：子进程随机被杀后重启，核对已 ack 的数据 —— **10/10 轮，丢失 0、半条 0**
 
-三后端都跑：native **211**、wasm-gc 根包 **186**、js 根包 **186**。
+三后端都跑：native **215**、wasm-gc 根包 **190**、js 根包 **190**。
 差的 25 条正好是「非 native 就跑不了」的那两组：
 `fs_native_wbtest.mbt` 的 18 条（测的是真实文件系统）+
 `cmd/dbcli/esc_wbtest.mbt` 的 7 条（`--target ... .` 只测根包，不含 cmd 子包）。
@@ -262,9 +262,9 @@ moon add PingGuoMiaoMiao/moonlsm     # 解析到 0.3.1
 ```bash
 moonc -v                                   # v0.10.18（需 >= 0.10.16）
 moon check --deny-warn                     # 零警告
-moon test                                  # 211 / 211
-moon test --target wasm-gc .               # 186 / 186
-moon test --target js .                    # 186 / 186
+moon test                                  # 215 / 215
+moon test --target wasm-gc .               # 190 / 190
+moon test --target js .                    # 190 / 190
 moon build --target native --release       # dbcli + examples
 moon fmt --check                           # 格式一致
 moon run examples/basic                    # 四步输出，二次运行数据仍在
