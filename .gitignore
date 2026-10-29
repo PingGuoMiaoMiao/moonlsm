@@ -15,6 +15,7 @@ pkg.generated.mbti
 benches/python/data/
 # 同场 A/B / 对照实验的临时数据目录（bench.py --data-dir ./data-*）
 benches/python/data-*/
+benches/python/data_*/
 benches/python/probe-data/
 benches/python/_t/
 # ADR-0008 的 A/B 对照：ab_base / ab_new / ab1m_base ...

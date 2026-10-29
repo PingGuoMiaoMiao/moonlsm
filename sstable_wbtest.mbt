@@ -432,3 +432,116 @@ test "sst: 不认识的版本必须拒绝打开" {
   buf.write_bytes(raw[n - 4:])
   assert_true(open_sst(buf.to_bytes()) is None)
 }
+
+///|
+/// 把游标整个抽干。区间过滤已在游标内部完成，这里不再筛。
+fn drain_cursor(cur : SstCursor) -> Array[Entry] {
+  let out : Array[Entry] = []
+  while true {
+    match cur.peek() {
+      Some(e) => {
+        out.push(e)
+        cur.advance()
+      }
+      None => break
+    }
+  }
+  out
+}
+
+///|
+/// **惰性是这个改动的全部意义，所以它必须被直接断言。**
+///
+/// 只测「扫出来的结果对不对」是不够的 —— 一个「先全解再截断」的实现
+/// 结果同样正确，但它没有省下任何解码成本。这里断言 `block_i`：
+/// 取 3 条之后，游标必须只解过 1 块。
+///
+/// 对照就在同一个用例里：`scan_range` 对同一区间返回全部 1000 条，
+/// 也就是它把整份文件的每一块都解了。
+test "sst: 游标是惰性的 —— 取 3 条只解 1 块" {
+  let r = must_open(build_sst(1000))
+  assert_true(r.block_count() > 3)
+  let cur = r.cursor(@utf8.encode("key:000000"), @utf8.encode("key:999999"))
+  assert_eq(cur.block_i, 0)
+  for i in 0..<3 {
+    let e = match cur.peek() {
+      Some(x) => x
+      None => fail("游标提前耗尽")
+    }
+    assert_eq(compare_bytes(e.key, @utf8.encode("key:" + pad6(i))), 0)
+    cur.advance()
+  }
+  // 解过 1 块（block_i 在解之前就 +1 了），而这一块里装的是上百条，
+  // 不是整个文件的 1000 条
+  assert_eq(cur.block_i, 1)
+  assert_true(cur.block.length() < 1000)
+  // 同一区间走旧路径：全部解出来
+  let all = r.scan_range(@utf8.encode("key:000000"), @utf8.encode("key:999999"))
+  assert_eq(all.length(), 1000)
+}
+
+///|
+/// 游标与 `scan_range` 必须**逐条一致**（key / value / seq / deleted 全比）。
+///
+/// `scan_range` 是上一版实现，`cursor` 是新实现。用老实现当基准比对，
+/// 比手写期望值更可靠 —— 期望值只会覆盖你想得到的情况。
+test "sst: 游标与 scan_range 逐条一致（多种区间）" {
+  let r = must_open(build_sst(1000))
+  let cases : Array[(String, String)] = [
+    ("key:000000", "key:999999"), // 全区间
+    ("key:000250", "key:000760"), // 两端都落在块中间
+    ("key:000000", "key:000003"), // 极窄，只 3 条
+    ("key:000100", "key:000100"), // 空区间（左闭右开）
+    ("key:000500", "key:000499"), // start > end
+    ("key:000990", "key:999999"), // 贴着尾部
+    ("aaa", "zzz"), // 覆盖全部
+    ("zzz", "zzzz"), // 完全在区间外（尾部之后）
+    ("", "aaa"), // 完全在区间外（头部之前）
+  ]
+  for c in cases {
+    let (s, e) = c
+    let sb = @utf8.encode(s)
+    let eb = @utf8.encode(e)
+    let want = r.scan_range(sb, eb)
+    let cur = r.cursor(sb, eb)
+    let got = drain_cursor(cur)
+    assert_eq(got.length(), want.length())
+    for i in 0..<got.length() {
+      assert_eq(compare_bytes(got[i].key, want[i].key), 0)
+      assert_eq(compare_bytes(got[i].value, want[i].value), 0)
+      assert_eq(got[i].seq, want[i].seq)
+      assert_eq(got[i].deleted, want[i].deleted)
+    }
+    // 游标正常走完时不该有解码失败
+    assert_eq(cur.failed, false)
+  }
+}
+
+///|
+/// 反复 `peek` 不推进，必须一直返回同一条 —— 否则归并器「先找最小 key、
+/// 再挑 seq 最大」的两遍扫描会读到不同的东西。
+test "sst: 游标反复 peek 不推进，返回同一条" {
+  let r = must_open(build_sst(300))
+  let cur = r.cursor(@utf8.encode("key:000100"), @utf8.encode("key:000200"))
+  let first = match cur.peek() {
+    Some(e) => e
+    None => fail("游标一开始就空了")
+  }
+  for _ in 0..<5 {
+    let again = match cur.peek() {
+      Some(e) => e
+      None => fail("重复 peek 变成空")
+    }
+    assert_eq(compare_bytes(again.key, first.key), 0)
+  }
+  assert_eq(compare_bytes(first.key, @utf8.encode("key:000100")), 0)
+}
+
+///|
+/// 空文件上的游标：`peek` 立刻返回 `None`，`failed` 保持 false。
+test "sst: 空文件的游标立刻耗尽" {
+  let r = must_open(SstWriter::new().finish())
+  let cur = r.cursor(b"a", b"z")
+  assert_true(cur.peek() is None)
+  assert_eq(cur.failed, false)
+}

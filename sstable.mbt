@@ -556,3 +556,203 @@ pub fn SstReader::scan_range(
   }
   out
 }
+
+///|
+/// SST 上的**惰性游标**：只在被推进到新块时才解一块。
+///
+/// 与 `scan_range` 只差一处，但那一处是数量级的：`scan_range` 会把整个
+/// 区间的条目一次全解出来，游标则是「要一条解一块」。
+/// `Db::scan` 带 `limit` 时，差别就是「要 10 条只解 1 块」对
+/// 「先把整个区间解完，再丢掉后面 99%」。
+///
+/// 为什么不是「给 `scan_range` 加个 limit 参数」：单看一个文件无法判断
+/// 「前 N 条」是不是全局的前 N 条（多路归并要跨文件比较），
+/// 所以限制只能由归并层施加，而限制一旦在归并层，来源就必须能被惰性推进。
+priv struct SstCursor {
+  reader : SstReader
+  /// 索引条目（每个 block 的 last_key 与 handle）。构造时取一次，
+  /// 之后每解一块只查一次数组，不重新解索引。
+  ies : Array[Entry]
+  start : Bytes
+  end : Bytes
+  /// 下一个要解的 block 下标。解完一块就 +1。
+  mut block_i : Int32
+  /// 当前块里**已经按区间过滤过**的条目。块消费完才换下一块。
+  mut block : Array[Entry]
+  mut pos : Int32
+  /// 没有更多块了。**注意**：为 true 时 `block` 里可能还有没消费完的条目，
+  /// 所以判断顺序必须是「先看 pos，再看 done」。
+  mut done : Bool
+  /// 解码失败过。
+  ///
+  /// `peek` 不能抛错 —— 归并器是纯函数，`MergeIterator::next` 的签名里
+  /// 没有 `raise`，为了这个改动去改它的签名会波及 compaction 与全部归并测试。
+  /// 所以这里只记标志，由 `Db::scan` 在返回前检查。
+  mut failed : Bool
+}
+
+///|
+/// 这个文件是否**可能**与 `[start, end)` 相交。
+///
+/// `range` 为 `None`（拿不到边界）时一律放行 —— 猜错下界的后果是
+/// 「数据明明在却被跳过」，比多扫一个文件严重得多。
+///
+/// 为什么要单独暴露这一步：`cursor` 内部也会做同样的判断，但那是
+/// **单个文件内部**的事。归并器每取一行都要遍历所有来源，来源数直接
+/// 乘在热路径上 —— 55 个文件里只有 1 个可能相交时，把另外 54 个
+/// 放进归并器就是 54 倍的无谓开销。
+fn SstReader::overlaps(self : SstReader, start : Bytes, end : Bytes) -> Bool {
+  match self.range {
+    Some((lo, hi)) =>
+      compare_bytes(hi, start) >= 0 && compare_bytes(lo, end) < 0
+    None => true
+  }
+}
+
+///|
+/// 在一个 SST 上开游标，范围 `[start, end)`。
+///
+/// 与 `scan_range` 一样先做**文件级剪枝**（整个文件与区间不相交就直接空游标），
+/// 再用索引二分定位第一个可能相交的 block。区别只是定位完不立刻解块。
+fn SstReader::cursor(self : SstReader, start : Bytes, end : Bytes) -> SstCursor {
+  // `entries()` 会抛 corruption，而游标的 `peek` 不能抛（见 `failed` 字段的说明）。
+  // 所以这里把错误就地转成「空且失败」的游标，由 `Db::scan` 统一检查。
+  let mut idx_failed = false
+  let ies = self.index.entries() catch {
+    _ => {
+      idx_failed = true
+      []
+    }
+  }
+  let cur = {
+    reader: self,
+    ies,
+    start,
+    end,
+    block_i: 0,
+    block: [],
+    pos: 0,
+    done: false,
+    failed: false,
+  }
+  if idx_failed {
+    cur.failed = true
+    cur.done = true
+    return cur
+  }
+  match self.range {
+    Some((lo, hi)) =>
+      if compare_bytes(hi, start) < 0 || compare_bytes(lo, end) >= 0 {
+        cur.done = true
+        return cur
+      }
+    None => ()
+  }
+  // 二分：第一个 last_key >= start 的 block
+  let mut lo = 0
+  let mut hi = cur.ies.length()
+  while lo < hi {
+    let mid = (lo + hi) / 2
+    if compare_bytes(cur.ies[mid].key, start) < 0 {
+      lo = mid + 1
+    } else {
+      hi = mid
+    }
+  }
+  cur.block_i = lo
+  if lo >= cur.ies.length() {
+    cur.done = true
+  }
+  cur
+}
+
+///|
+/// 解下一块，并把块内落在区间外的条目滤掉。
+///
+/// 块内线性过滤而不是块内二分：一个 block 只有 4 KiB / 一百多条，
+/// 解出来再筛比再写一套「块内定位 + 向后遍历」简单，成本与块大小同阶。
+fn SstCursor::load_next(self : SstCursor) -> Unit {
+  self.block = []
+  self.pos = 0
+  if self.block_i >= self.ies.length() {
+    self.done = true
+    return
+  }
+  let ie = self.ies[self.block_i]
+  self.block_i = self.block_i + 1
+  let (off, size) = match decode_handle(ie.value) {
+    Some(p) => p
+    None => {
+      self.failed = true
+      self.done = true
+      return
+    }
+  }
+  if off + size > self.reader.data.length() {
+    self.failed = true
+    self.done = true
+    return
+  }
+  let blk = match
+    decode_block_ver(
+      self.reader.data[off:off + size].to_owned(),
+      self.reader.footer.version,
+    ) {
+    Some(b) => b
+    None => {
+      self.failed = true
+      self.done = true
+      return
+    }
+  }
+  let mut entries_failed = false
+  let es = blk.entries() catch {
+    _ => {
+      entries_failed = true
+      []
+    }
+  }
+  if entries_failed {
+    self.failed = true
+    self.done = true
+    return
+  }
+  let kept : Array[Entry] = []
+  for e in es {
+    if compare_bytes(e.key, self.start) >= 0 &&
+      compare_bytes(e.key, self.end) < 0 {
+      kept.push(e)
+    }
+  }
+  self.block = kept
+  // 这一块的 last_key 已经 >= end，后面的块必然全部越界。
+  // 这里置 done 而不是 return：当前块还得让调用方读完。
+  if compare_bytes(ie.key, self.end) >= 0 {
+    self.done = true
+  }
+}
+
+///|
+/// 看当前条目，不推进。
+///
+/// 块用完才解下一块 —— 这是「惰性」的全部内容。
+fn SstCursor::peek(self : SstCursor) -> Entry? {
+  let mut out : Entry? = None
+  let mut go = true
+  while go {
+    if self.pos < self.block.length() {
+      out = Some(self.block[self.pos])
+      go = false
+    } else if self.done {
+      go = false
+    } else {
+      self.load_next()
+    }
+  }
+  out
+}
+
+///|
+fn SstCursor::advance(self : SstCursor) -> Unit {
+  self.pos = self.pos + 1
+}

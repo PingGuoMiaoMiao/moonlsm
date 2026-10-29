@@ -799,21 +799,30 @@ pub fn[S] Db::get(self : Db[S], key : Bytes) -> Bytes? {
 /// 用左闭右开而不是双闭：双闭无法表达「扫到最大 key 之后」，
 /// 调用方得造一个「比所有 key 都大」的哨兵值，而 key 是任意二进制，
 /// 没有这样的哨兵。
+///
+/// **来源是惰性推进的**（ADR-0011）：memtable 从 `lower_bound(start)` 起走，
+/// 每个 SST 开一个块级游标。`limit` 一到就停，没被用到的块根本没被解出来。
+/// 之前这里是「先把每个来源的整个区间读成数组，再归并」，于是
+/// 「要 10 条」和「要 10 万条」付同样的解码成本。
 pub fn[S] Db::scan(
   self : Db[S],
   start : Bytes,
   end : Bytes,
   limit : Int32,
 ) -> Array[KvPair] raise LsmError {
-  let sources : Array[Array[Entry]] = []
-  sources.push(self.mem.to_entries())
+  let sources : Array[Source] = []
+  // memtable 已经是有序数组，只需把起点挪到第一个 >= start 的位置。
+  sources.push(FromArray(ArrayCursor::new_from(self.mem.to_entries(), start)))
   for s in self.ssts {
-    // 用 `scan_range` 而不是 `entries()`：只解出落在 [start, end) 里的块。
-    // 全量解出的话，扫 500 条也要付「整个文件」的解码成本，
-    // 数据量一大 scan 就退化成 O(整个库)。
-    sources.push(s.reader.scan_range(start, end))
+    // 文件级剪枝要在**进归并器之前**做，不能指望游标自己发现「我不相交」：
+    // 归并器每取一行都要遍历所有来源，一个永远返回 `None` 的来源
+    // 也照样要付一次 `peek` 的钱。55 个文件里只有 1 个相交时，
+    // 另外 54 个就是纯粹的乘数。
+    if s.reader.overlaps(start, end) {
+      sources.push(FromSst(s.reader.cursor(start, end)))
+    }
   }
-  let it = MergeIterator::new(sources)
+  let it = MergeIterator::from_sources(sources)
   let out : Array[KvPair] = []
   while out.length() < limit {
     match it.next() {
@@ -832,6 +841,14 @@ pub fn[S] Db::scan(
       }
       None => break
     }
+  }
+  // 有来源解码失败时结果是不完整的，不能当作「扫到了这些」返回。
+  // 正常情况下走不到这里：`Db::open` 已经把所有 SST 的块全解过一遍（ADR-0010），
+  // 而 `SstReader.data` 是打开时的内存副本，之后不会被改。
+  if it.failed() {
+    raise LsmError::corruption(
+      "sst: 扫描时遇到无法解码的 data block（open 时校验通过，说明文件在运行期被外部改动）",
+    )
   }
   out
 }
