@@ -63,6 +63,13 @@
 | `crash_test.py --rounds 10` | 10/10，丢失 0 半条 0 |
 | `examples/basic` | 四步全过，二次运行数据仍在 |
 
+### 发布
+
+本版起**每次发布都打 annotated tag**（`v0.3.1`），tag 名与 `moon.mod` 的
+`version` 一致。0.1.0–0.3.0 没有 tag —— 那时的发布动作没有留 commit，
+事后补打只能猜「发布那一刻的代码是哪个 commit」，猜错的 tag 比没有更糟，
+所以不补。发布检查清单里加了这一步（`docs/engineering/ACCEPTANCE.md` §7）。
+
 ---
 
 ## [0.3.0] - 2026-10-26

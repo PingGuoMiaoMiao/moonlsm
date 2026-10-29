@@ -392,7 +392,7 @@ Pebble / LevelDB / Badger→  你的质检员，只抄测试和格式
 ### 正确性
 
 - [ ] `moon check --deny-warn` 退出码 0，零警告
-- [ ] `moon test` 全绿，测试数 ≥ 30
+- [ ] `moon test` 全绿（当前 211 条），三后端分别跑过
 - [ ] `probe_persistence.py` 退出码 0
 - [ ] `model_check.py --ops 2000 --restart-every 500` 错误 0
 - [ ] `crash_test.py --rounds 20` 通过 20/20
@@ -418,6 +418,11 @@ Pebble / LevelDB / Badger→  你的质检员，只抄测试和格式
 - [ ] README 首屏能让人 10 分钟跑通示例
 - [ ] README 明确写出「不做什么」
 - [ ] `moon publish` 成功
+- [ ] 发布后打 annotated tag，名字与 `moon.mod` 的 `version` 一致
+      （`git tag -a v0.3.1 -m "..."`），并 `git push origin v0.3.1`
+- [ ] 发布后在**临时模块**里 `moon add PingGuoMiaoMiao/moonlsm`，确认解析到该版本
+- [ ] 解包 `~/.moon/registry/cache/PingGuoMiaoMiao/moonlsm/<ver>.zip`，
+      确认 `moon.mod` 的 version、关键符号、`docs/adr/` 都在包内
 
 ---
 

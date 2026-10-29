@@ -71,7 +71,10 @@ gh repo view PingGuoMiaoMiao/moonlsm --json visibility
   `test` / `chore` / `release` / `refactor`），类型一眼能看出改了什么
 - 每个非平凡决策一篇 ADR（`docs/adr/`，共 10 篇），记录**当时否决了什么**，
   不只是「最后选了什么」
-- 每次发布都有对应的 `release:` 提交，`CHANGELOG.md` 与 tag 对齐
+- 每次发布都有对应的 `release:` 提交；**0.3.1 起发布即打 annotated tag**
+  （`v0.3.1`，tag 名与 `moon.mod` 的 `version` 一致）。
+  0.1.0–0.3.0 没有 tag，原因写在 `CHANGELOG.md` 的 `[0.3.1]` 段：
+  那几次发布没有留 commit，事后补打只能猜，猜错的 tag 比没有更糟
 
 ```bash
 git log --oneline | head -20
