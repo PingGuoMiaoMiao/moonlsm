@@ -99,7 +99,13 @@ printf '%s\n' \
 ```
 
 再跑一次 `{"op":"get","k":"user:1"}` —— 换成新进程，数据还在。
-磁盘上会看到 `CURRENT` / `MANIFEST-*` / `wal/<n>.wal` / `sst/<n>.sst`。
+
+```bash
+ls ./data     # CURRENT  MANIFEST-*  sst  wal
+```
+
+`sst/` 一开始是空的：一条记录还躺在 WAL 里，等 memtable 写满 8 MiB 才 flush 成
+L0 文件。想看文件数变化，把 `examples/basic/main.mbt` 里的阈值改成 64 KiB 再写几万条。
 
 > **当前进度：Week 3。** WAL + MANIFEST + 三层 compaction 全部打通：
 > 写入先落 WAL 再 ack，`kill -9` 不丢已确认数据（`crash_test.py --rounds 20` 全绿），

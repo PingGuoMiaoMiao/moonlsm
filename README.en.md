@@ -107,7 +107,15 @@ printf '%s\n' \
 ```
 
 Run `{"op":"get","k":"user:1"}` again in a fresh process — the data is still there.
-On disk you will see `CURRENT` / `MANIFEST-*` / `wal/<n>.wal` / `sst/<n>.sst`.
+
+```bash
+ls ./data     # CURRENT  MANIFEST-*  sst  wal
+```
+
+`sst/` starts out empty: a single record still lives in the WAL and is only
+flushed to an L0 file once the memtable hits 8 MiB. To watch the file count
+change, lower that threshold in `examples/basic/main.mbt` and write tens of
+thousands of keys.
 
 > **Status: Week 3.** WAL + MANIFEST + three-level compaction are all wired up:
 > writes land in the WAL before ack, `kill -9` loses no acknowledged data
