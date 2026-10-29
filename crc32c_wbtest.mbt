@@ -27,11 +27,11 @@ test "crc32c: 单字节与递增序列的已知值" {
 test "crc32c: 单比特翻转必须改变校验和" {
   // 这是校验和存在的全部意义：任何一位变化都要被发现。
   // 8 字节 × 8 位 = 64 种单比特变化，一个都不能漏。
-  let base : Array[Int] = [0, 0, 0, 0, 0, 0, 0, 0]
+  let base : Array[Int32] = [0, 0, 0, 0, 0, 0, 0, 0]
   let good = crc32c(bytes_of(base))
   for i in 0..<8 {
     for bit in 0..<8 {
-      let mutated : Array[Int] = []
+      let mutated : Array[Int32] = []
       for j in 0..<8 {
         mutated.push(if j == i { 1 << bit } else { 0 })
       }

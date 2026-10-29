@@ -33,27 +33,37 @@ extern "C" fn c_fopen(path : Bytes, mode : Bytes) -> UInt64 = "fopen"
 
 ///|
 #borrow(ptr)
-extern "C" fn c_fwrite(ptr : Bytes, size : Int, n : Int, f : UInt64) -> UInt64 = "fwrite"
+extern "C" fn c_fwrite(
+  ptr : Bytes,
+  size : Int32,
+  n : Int32,
+  f : UInt64,
+) -> UInt64 = "fwrite"
 
 ///|
 #borrow(ptr)
-extern "C" fn c_fread(ptr : Bytes, size : Int, n : Int, f : UInt64) -> UInt64 = "fread"
+extern "C" fn c_fread(
+  ptr : Bytes,
+  size : Int32,
+  n : Int32,
+  f : UInt64,
+) -> UInt64 = "fread"
 
 ///|
-extern "C" fn c_fflush(f : UInt64) -> Int = "fflush"
+extern "C" fn c_fflush(f : UInt64) -> Int32 = "fflush"
 
 ///|
-extern "C" fn c_fclose(f : UInt64) -> Int = "fclose"
+extern "C" fn c_fclose(f : UInt64) -> Int32 = "fclose"
 
 ///|
-extern "C" fn c_fileno(f : UInt64) -> Int = "fileno"
+extern "C" fn c_fileno(f : UInt64) -> Int32 = "fileno"
 
 // 64 位定位。Windows 上 `long` 是 32 位，`fseek` 只能定位到 2 GiB；
 // POSIX 上 `fseeko` 的 `off_t` 是 64 位。两边函数名不同，必须分开声明。
 
 ///|
 #cfg(platform="windows")
-extern "C" fn c_seek(f : UInt64, off : Int64, whence : Int) -> Int = "_fseeki64"
+extern "C" fn c_seek(f : UInt64, off : Int64, whence : Int32) -> Int32 = "_fseeki64"
 
 ///|
 #cfg(platform="windows")
@@ -61,7 +71,7 @@ extern "C" fn c_tell(f : UInt64) -> Int64 = "_ftelli64"
 
 ///|
 #cfg(not(platform="windows"))
-extern "C" fn c_seek(f : UInt64, off : Int64, whence : Int) -> Int = "fseeko"
+extern "C" fn c_seek(f : UInt64, off : Int64, whence : Int32) -> Int32 = "fseeko"
 
 ///|
 #cfg(not(platform="windows"))
@@ -73,11 +83,11 @@ extern "C" fn c_tell(f : UInt64) -> Int64 = "ftello"
 
 ///|
 #cfg(platform="windows")
-extern "C" fn c_sync_fd(fd : Int) -> Int = "_commit"
+extern "C" fn c_sync_fd(fd : Int32) -> Int32 = "_commit"
 
 ///|
 #cfg(not(platform="windows"))
-extern "C" fn c_sync_fd(fd : Int) -> Int = "fsync"
+extern "C" fn c_sync_fd(fd : Int32) -> Int32 = "fsync"
 
 // ---------------------------------------------------------------------------
 // 目录与文件管理
@@ -86,29 +96,29 @@ extern "C" fn c_sync_fd(fd : Int) -> Int = "fsync"
 ///|
 #cfg(platform="windows")
 #borrow(p)
-extern "C" fn c_mkdir_win(p : Bytes) -> Int = "_mkdir"
+extern "C" fn c_mkdir_win(p : Bytes) -> Int32 = "_mkdir"
 
 ///|
 #cfg(not(platform="windows"))
 #borrow(p)
-extern "C" fn c_mkdir_posix(p : Bytes, mode : Int) -> Int = "mkdir"
+extern "C" fn c_mkdir_posix(p : Bytes, mode : Int32) -> Int32 = "mkdir"
 
 ///|
 #cfg(platform="windows")
-fn mkdir_at(p : Bytes) -> Int {
+fn mkdir_at(p : Bytes) -> Int32 {
   c_mkdir_win(p)
 }
 
 ///|
 #cfg(not(platform="windows"))
-fn mkdir_at(p : Bytes) -> Int {
+fn mkdir_at(p : Bytes) -> Int32 {
   c_mkdir_posix(p, 0x1FF)
 }
 
 ///|
 #cfg(not(platform="windows"))
 #borrow(a, b)
-extern "C" fn c_rename_posix(a : Bytes, b : Bytes) -> Int = "rename"
+extern "C" fn c_rename_posix(a : Bytes, b : Bytes) -> Int32 = "rename"
 
 // Windows 的 `rename` 在目标已存在时**直接失败**（POSIX 是原子覆盖）。
 // CURRENT 的切换每次都是「新名字覆盖旧名字」，所以这里必须用
@@ -121,7 +131,7 @@ extern "C" fn c_rename_posix(a : Bytes, b : Bytes) -> Int = "rename"
 ///|
 #cfg(platform="windows")
 #borrow(a, b)
-extern "C" fn c_move_win(a : Bytes, b : Bytes, flags : Int) -> Int = "MoveFileExA"
+extern "C" fn c_move_win(a : Bytes, b : Bytes, flags : Int32) -> Int32 = "MoveFileExA"
 
 ///|
 /// 统一成「返回 0 = 成功」。
@@ -132,7 +142,7 @@ extern "C" fn c_move_win(a : Bytes, b : Bytes, flags : Int) -> Int = "MoveFileEx
 /// 表现为「改名成功时报错、失败时静默通过」，是最难查的那类 bug。
 /// 所以归一化必须在 `rename_at` 内部完成，不能泄漏给调用方。
 #cfg(platform="windows")
-fn rename_at(from : Bytes, to : Bytes) -> Int {
+fn rename_at(from : Bytes, to : Bytes) -> Int32 {
   if c_move_win(from, to, 0x1 | 0x8) != 0 {
     0
   } else {
@@ -142,13 +152,13 @@ fn rename_at(from : Bytes, to : Bytes) -> Int {
 
 ///|
 #cfg(not(platform="windows"))
-fn rename_at(from : Bytes, to : Bytes) -> Int {
+fn rename_at(from : Bytes, to : Bytes) -> Int32 {
   c_rename_posix(from, to)
 }
 
 ///|
 #borrow(p)
-extern "C" fn c_remove(p : Bytes) -> Int = "remove"
+extern "C" fn c_remove(p : Bytes) -> Int32 = "remove"
 
 // 目录 fsync：rename 只保证「原子」，不保证「持久」。
 // 要把 CURRENT 的切换变成崩溃后可见的事实，必须 fsync 所在目录。
@@ -157,11 +167,11 @@ extern "C" fn c_remove(p : Bytes) -> Int = "remove"
 ///|
 #cfg(not(platform="windows"))
 #borrow(p)
-extern "C" fn c_open(p : Bytes, flags : Int, mode : Int) -> Int = "open"
+extern "C" fn c_open(p : Bytes, flags : Int32, mode : Int32) -> Int32 = "open"
 
 ///|
 #cfg(not(platform="windows"))
-extern "C" fn c_close(fd : Int) -> Int = "close"
+extern "C" fn c_close(fd : Int32) -> Int32 = "close"
 
 // ---------------------------------------------------------------------------
 // 读写辅助
@@ -251,7 +261,7 @@ pub struct NativeStorage {
 /// `root` 是数据目录。传空串表示当前目录。
 /// 所有文件路径都是 `root + "/" + name`，Windows 也接受 `/` 作为分隔符。
 pub fn NativeStorage::new(root : String) -> NativeStorage {
-  { root, handle: None }
+  { root, handle: None, }
 }
 
 ///|
@@ -294,7 +304,7 @@ fn NativeStorage::handle_for(
       // 会一直占着文件，直到进程退出。
       self.close_handle()
       let f = self.open_or_fail(name, "ab")
-      self.handle = Some({ name, f })
+      self.handle = Some({ name, f, })
       f
     }
   }
@@ -597,7 +607,7 @@ pub impl Storage for NativeStorage with fn remove_file(self, name) -> Unit raise
 }
 
 ///|
-pub impl Storage for NativeStorage with fn file_size(self, name) -> Int? raise LsmError {
+pub impl Storage for NativeStorage with fn file_size(self, name) -> Int32? raise LsmError {
   let f = c_fopen(self.path(name), cstr("rb"))
   if f == 0UL {
     return None
@@ -612,7 +622,9 @@ pub impl Storage for NativeStorage with fn file_size(self, name) -> Int? raise L
 }
 
 ///|
-pub impl Storage for NativeStorage with fn list_files(self, dir) -> Array[String] raise LsmError {
+pub impl Storage for NativeStorage with fn list_files(self, dir) -> Array[
+  String,
+] raise LsmError {
   // 没有可移植的 readdir：POSIX 是 opendir/readdir，Windows 是
   // FindFirstFile。这里用 MoonBit 运行时自带的实现（runtime/sync_io.c
   // 里的 moonbit_read_dir_ffi），它已经把两边都封好了。
@@ -689,7 +701,7 @@ extern "C" fn c_read_dir(path : Bytes) -> FixedArray[Bytes] = "moonbit_read_dir_
 /// 目录存在性检查。同样是运行时导出：1 = 是目录，0 = 存在但不是目录，
 /// -1 = 不存在或无法访问。用它给 `c_read_dir` 做前置守卫。
 #borrow(p)
-extern "C" fn c_is_dir(p : Bytes) -> Int = "moonbit_is_dir_ffi"
+extern "C" fn c_is_dir(p : Bytes) -> Int32 = "moonbit_is_dir_ffi"
 
 ///|
 /// 用 native 后端打开数据库。
@@ -698,6 +710,9 @@ extern "C" fn c_is_dir(p : Bytes) -> Int = "moonbit_is_dir_ffi"
 /// 直接跨包调 `Db::open(storage, ...)` 会在进入函数体之前就段错误——
 /// 泛型结构体按值跨包传递在这个工具链版本上不可靠。
 /// 包一层非泛型函数把实例化点留在库内，就绕开了这个问题。
-pub fn open_native(dir : String, mem_limit : Int) -> Db[NativeStorage] raise LsmError {
+pub fn open_native(
+  dir : String,
+  mem_limit : Int32,
+) -> Db[NativeStorage] raise LsmError {
   Db::open(NativeStorage::new(dir), mem_limit)
 }

@@ -10,7 +10,7 @@
 /// 4. **坏数据拒绝**（宁可拒绝打开，也不能拿着可疑 filter 去过滤）
 
 ///|
-fn make_keys(prefix : String, n : Int) -> Array[Bytes] {
+fn make_keys(prefix : String, n : Int32) -> Array[Bytes] {
   let out : Array[Bytes] = []
   for i in 0..<n {
     out.push(@utf8.encode(prefix + pad6(i)))
@@ -23,7 +23,7 @@ fn make_keys(prefix : String, n : Int) -> Array[Bytes] {
 fn measure_fpr(
   filter : BloomFilter,
   absent_prefix : String,
-  absent : Int,
+  absent : Int32,
 ) -> Double {
   let mut false_positive = 0
   for k in make_keys(absent_prefix, absent) {
@@ -109,7 +109,13 @@ test "bloom: 内存表示就是磁盘表示" {
   assert_eq(f.num_bits % 8, 0)
   let encoded = f.encode()
   // 1 字节 k + varint(num_bits) + 位图 + 4 字节 CRC（v2）
-  let varint_len = if f.num_bits < 128 { 1 } else if f.num_bits < 16384 { 2 } else { 3 }
+  let varint_len = if f.num_bits < 128 {
+    1
+  } else if f.num_bits < 16384 {
+    2
+  } else {
+    3
+  }
   assert_eq(encoded.length(), 1 + varint_len + f.num_bits / 8 + 4)
   // 编码出来的字节里，位图段与内存逐字节相同
   let body = encoded[1 + varint_len:]

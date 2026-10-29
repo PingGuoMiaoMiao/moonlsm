@@ -4,7 +4,7 @@
 ///
 /// **返回值恒为 -1 / 0 / 1**，不返回长度差值。
 /// 这样调用方可以安全地写 `== -1` 判断，而不只是依赖符号。
-pub fn compare_bytes(a : Bytes, b : Bytes) -> Int {
+pub fn compare_bytes(a : Bytes, b : Bytes) -> Int32 {
   let n = if a.length() < b.length() { a.length() } else { b.length() }
   for i in 0..<n {
     let x = a[i].to_int()
@@ -30,7 +30,7 @@ pub fn compare_bytes(a : Bytes, b : Bytes) -> Int {
 ///
 /// 存在的意义：把 UTF-8 编码细节收在库内，调用方（dbcli / 测试）不用自己
 /// 处理 Bytes 转换，也不会误用 `String::compare`（它按长度优先，不是字节序）。
-pub fn compare_strings(a : String, b : String) -> Int {
+pub fn compare_strings(a : String, b : String) -> Int32 {
   compare_bytes(@utf8.encode(a), @utf8.encode(b))
 }
 
@@ -39,18 +39,18 @@ pub fn compare_strings(a : String, b : String) -> Int {
 /// Week 3 若性能不够，再换成跳表（接口不变）。
 pub struct MemTable {
   entries : Array[Entry]
-  mut bytes : Int
-  limit : Int
+  mut bytes : Int32
+  limit : Int32
 }
 
 ///|
-pub fn MemTable::new(limit : Int) -> MemTable {
+pub fn MemTable::new(limit : Int32) -> MemTable {
   { entries: [], bytes: 0, limit, }
 }
 
 ///|
 /// 第一个 >= key 的位置。
-fn MemTable::lower_bound(self : MemTable, key : Key) -> Int {
+fn MemTable::lower_bound(self : MemTable, key : Key) -> Int32 {
   let mut lo = 0
   let mut hi = self.entries.length()
   while lo < hi {

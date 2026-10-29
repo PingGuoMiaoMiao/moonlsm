@@ -31,7 +31,7 @@ fn bad_byte() -> Byte {
 
 ///|
 /// 截取前 `n` 字节，返回新的一份。
-fn cut_to(b : Bytes, n : Int) -> Bytes {
+fn cut_to(b : Bytes, n : Int32) -> Bytes {
   b[:n].to_owned()
 }
 
@@ -40,7 +40,7 @@ fn cut_to(b : Bytes, n : Int) -> Bytes {
 ///
 /// 名字不用 `flip` / `poke`：白盒测试的顶层标识符在整个包里共享，
 /// `manifest_wbtest.mbt` 已经有一个 `flip`，重名直接编译失败。
-fn corrupt_at(b : Bytes, at : Int, value : Byte) -> Bytes {
+fn corrupt_at(b : Bytes, at : Int32, value : Byte) -> Bytes {
   let buf = Buffer::Buffer()
   buf.write_bytes(b[:at])
   buf.write_byte(value)
@@ -64,7 +64,7 @@ fn failure_message(f : () -> Unit raise LsmError) -> String {
 
 ///|
 /// 把 `n` 条记录编成一个完整 WAL（含文件头）。
-fn wal_of(n : Int) -> Bytes {
+fn wal_of(n : Int32) -> Bytes {
   let buf = Buffer::Buffer()
   buf.write_bytes(empty_wal_bytes()[:])
   for i in 0..<n {
@@ -95,7 +95,9 @@ test "corruption: SST 被截断 → 拒绝启动，且错误信息里带文件�
   // 紧接着的 `power_loss()` 会用 durable 那份把它盖回去，注入等于没做。
   MemStorage::plant(st, p, cut_to(raw, raw.length() - 10))
   st.power_loss()
-  let msg = failure_message(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) })
+  let msg = failure_message(fn() raise LsmError {
+    ignore(Db::open(st, 1 << 20))
+  })
   // 必须点名是哪个文件。只说「数据损坏」等于没说。
   assert_true(msg.has_prefix("Corruption: "))
   assert_true(msg.contains(p))
@@ -111,7 +113,9 @@ test "corruption: SST 被清空 → 拒绝启动" {
   let p = sst_path(num)
   MemStorage::plant(st, p, Bytes::new(0))
   st.power_loss()
-  let msg = failure_message(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) })
+  let msg = failure_message(fn() raise LsmError {
+    ignore(Db::open(st, 1 << 20))
+  })
   assert_true(msg.contains(p))
 }
 
@@ -130,7 +134,9 @@ test "corruption: SST 的 footer magic 被改坏 → 拒绝启动" {
   // footer 的最后 4 字节是 magic，改掉它
   MemStorage::plant(st, p, corrupt_at(raw, raw.length() - 1, bad_byte()))
   st.power_loss()
-  let msg = failure_message(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) })
+  let msg = failure_message(fn() raise LsmError {
+    ignore(Db::open(st, 1 << 20))
+  })
   assert_true(msg.contains(p))
 }
 
@@ -144,7 +150,9 @@ test "corruption: MANIFEST 登记的 SST 文件不见了 → 拒绝启动" {
   // 只删文件、不动 MANIFEST：这是「有人手工删了 sst 目录里的东西」
   Storage::remove_file(st, sst_path(num))
   st.power_loss()
-  let msg = failure_message(fn() raise LsmError { ignore(Db::open(st, 1 << 20)) })
+  let msg = failure_message(fn() raise LsmError {
+    ignore(Db::open(st, 1 << 20))
+  })
   assert_true(msg.contains(sst_path(num)))
 }
 
@@ -156,9 +164,7 @@ test "corruption: WAL 中间一条记录 CRC 坏 → 截断到它之前，不 pa
   // 三条记录：k0 / k1 / k2。故意在**中间**那条上做手脚。
   let good = wal_of(3)
   let header = empty_wal_bytes().length()
-  let f1 = encode_frame(
-    WalRecord::new(1UL, Op::Put(kb("k0"), kb("v0"))),
-  )
+  let f1 = encode_frame(WalRecord::new(1UL, Op::Put(kb("k0"), kb("v0"))))
   // 第 2 帧的 payload 起始位置：文件头 + 第 1 帧 + 第 2 帧的 crc(4) + len(1) + type(1)
   let second_payload = header + f1.length() + 4 + 1 + 1
   MemStorage::plant(st, wal_name, corrupt_at(good, second_payload, bad_byte()))
@@ -265,7 +271,7 @@ test "corruption: SST 任意单字节损坏都不 panic（fuzz）" {
   }
   let mut tried = 0
   let mut rejected = 0
-  let missed : Array[Int] = []
+  let missed : Array[Int32] = []
   for at in 0..<template.length() {
     let st = MemStorage::new()
     // 摆出一个「完全合法、只有这个 SST 的这一个字节不对」的现场

@@ -15,7 +15,7 @@ fn must_open(raw : Bytes) -> SstReader {
 
 ///|
 /// 写 `n` 条 `key:%06d -> value:<i>` 并返回原始字节。
-fn build_sst(n : Int) -> Bytes raise {
+fn build_sst(n : Int32) -> Bytes raise {
   let w = SstWriter::new()
   for i in 0..<n {
     w.add(mk("key:" + pad6(i), "value:" + i.to_string(), (i + 1).to_uint64()))
@@ -225,16 +225,16 @@ test "sst: scan_range 与全量筛选逐条一致（含块边界）" {
   }
   // 参照实现：直接筛
   let cases : Array[(String, String)] = [
-    ("", "zzzzzz"),                       // 全量
-    ("key:000000", "key:" + pad6(n)),     // 正好覆盖全部
-    ("key:000010", "key:000020"),         // 块中间开始、块中间结束
-    ("key:000015", "key:000016"),         // 只有一条
-    ("key:000015", "key:000015"),         // 空区间（左闭右开）
+    ("", "zzzzzz"), // 全量
+    ("key:000000", "key:" + pad6(n)), // 正好覆盖全部
+    ("key:000010", "key:000020"), // 块中间开始、块中间结束
+    ("key:000015", "key:000016"), // 只有一条
+    ("key:000015", "key:000015"), // 空区间（左闭右开）
     ("key:" + pad6(n - 1), "key:999999"), // 最后一条
-    ("key:" + pad6(n), "key:999999"),     // 完全越界（右）
-    ("aaaa", "bbbb"),                     // 完全越界（左）
-    ("key:000000", "key:000001"),         // 第一条
-    ("key:000100", "key:000100"),         // 空区间，落在块边界上
+    ("key:" + pad6(n), "key:999999"), // 完全越界（右）
+    ("aaaa", "bbbb"), // 完全越界（左）
+    ("key:000000", "key:000001"), // 第一条
+    ("key:000100", "key:000100"), // 空区间，落在块边界上
   ]
   for c in cases {
     let (s, e) = c
@@ -376,7 +376,7 @@ test "sst: 区间不相交时 scan_range 返回空" {
 ///
 /// 这里直接调 `with_version` 而不是 `new()`：只有白盒测试需要造老格式，
 /// 生产路径不该有一个「写出旧格式」的开关 —— 那种开关迟早会被人手滑用上。
-fn build_sst_v1(n : Int) -> Bytes raise {
+fn build_sst_v1(n : Int32) -> Bytes raise {
   let w = SstWriter::with_version(SST_VERSION_V1)
   for i in 0..<n {
     w.add(mk("key:" + pad6(i), "value:" + i.to_string(), (i + 1).to_uint64()))
@@ -413,7 +413,10 @@ test "sst: v1 格式的老文件仍能打开且内容一致" {
   // 点查与扫描也要走通（它们和 entries 走的是不同的 block 解码入口）
   let k = @utf8.encode("key:000123")
   assert_true(r1.get(k) is Some(_))
-  let scanned = r1.scan_range(@utf8.encode("key:000100"), @utf8.encode("key:000110"))
+  let scanned = r1.scan_range(
+    @utf8.encode("key:000100"),
+    @utf8.encode("key:000110"),
+  )
   assert_eq(scanned.length(), 10)
 }
 

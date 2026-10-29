@@ -44,10 +44,7 @@ test "items_json: 中文按 UTF-8 输出，不是逐字节映射" {
   let got = items_json([pair("用户:1", "爱丽丝")])
   assert_eq(got, "[[\"用户:1\",\"爱丽丝\"]]")
   // 逐字节比对，确认没有被二次编码
-  assert_eq(
-    @utf8.encode(got),
-    @utf8.encode("[[\"用户:1\",\"爱丽丝\"]]"),
-  )
+  assert_eq(@utf8.encode(got), @utf8.encode("[[\"用户:1\",\"爱丽丝\"]]"))
 }
 
 ///|

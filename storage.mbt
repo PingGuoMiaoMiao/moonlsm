@@ -63,7 +63,7 @@ pub trait Storage {
 
   ///|
   /// 文件大小。不存在返回 `None`。
-  fn file_size(Self, String) -> Int? raise LsmError
+  fn file_size(Self, String) -> Int32? raise LsmError
 
   ///|
   /// 列出**某个子目录**下的文件名（返回 basename，不含目录部分）。
@@ -92,7 +92,7 @@ pub trait Storage {
 pub struct MemStorage {
   files : Map[String, Bytes]
   durable : Map[String, Bytes]
-  mut syncs : Int
+  mut syncs : Int32
   mut fail_sync : Bool
   mut fail_write : Bool
 }
@@ -110,7 +110,7 @@ pub fn MemStorage::new() -> MemStorage {
 
 ///|
 /// 已经发生的 `sync_file` 次数。用来断言「批量写只 sync 一次」这类行为。
-pub fn MemStorage::syncs(self : MemStorage) -> Int {
+pub fn MemStorage::syncs(self : MemStorage) -> Int32 {
   self.syncs
 }
 
@@ -299,7 +299,7 @@ pub impl Storage for MemStorage with fn remove_file(self, name) -> Unit raise Ls
 }
 
 ///|
-pub impl Storage for MemStorage with fn file_size(self, name) -> Int? raise LsmError {
+pub impl Storage for MemStorage with fn file_size(self, name) -> Int32? raise LsmError {
   match self.files.get(name) {
     Some(v) => Some(v.length())
     None => None

@@ -14,21 +14,21 @@
 
 ///|
 /// footer 固定 48 字节（§3.5）。
-pub const SST_FOOTER_SIZE : Int = 48
+pub const SST_FOOTER_SIZE : Int32 = 48
 
 ///|
 /// 当前写出的 SST 版本。读到更大的版本必须拒绝打开（§5.2）。
 ///
 /// **2** = data block / index block 尾部带 CRC32C（ADR-0010）。
 /// 写端永远写这个版本，读端同时认 1（老库）与 2。
-pub const SST_VERSION : Int = 2
+pub const SST_VERSION : Int32 = 2
 
 ///|
 /// 唯一仍然支持的旧版本：block 没有尾部 CRC。
 ///
 /// 留着它是为了「升级不炸库」—— 读到 v1 文件照常能读，
 /// 但**不做内容校验**。下一次 compaction 会把数据重写成 v2。
-pub const SST_VERSION_V1 : Int = 1
+pub const SST_VERSION_V1 : Int32 = 1
 
 ///|
 /// 文件末尾的魔数 `"MSST"`。
@@ -37,17 +37,17 @@ const SST_MAGIC : Bytes = b"MSST"
 ///|
 /// 解析出来的 footer。
 pub struct SstFooter {
-  filter_offset : Int
-  filter_size : Int
-  index_offset : Int
-  index_size : Int
+  filter_offset : Int32
+  filter_size : Int32
+  index_offset : Int32
+  index_size : Int32
   smallest_seq : UInt64
-  version : Int
+  version : Int32
 }
 
 ///|
 /// 比较 `data[pos..]` 处的若干字节是否等于 `want`。
-fn bytes_match(data : Bytes, pos : Int, want : Bytes) -> Bool {
+fn bytes_match(data : Bytes, pos : Int32, want : Bytes) -> Bool {
   if pos < 0 || pos + want.length() > data.length() {
     return false
   }
@@ -63,7 +63,7 @@ fn bytes_match(data : Bytes, pos : Int, want : Bytes) -> Bool {
 /// 读一个 u64 偏移并降级成 `Int`。
 /// 超过 `Int` 能表示的范围就判定为损坏 —— 宁可拒绝打开，
 /// 也不要截断成一个看似合理的小偏移去读错位置。
-fn read_offset(data : Bytes, pos : Int) -> Int? {
+fn read_offset(data : Bytes, pos : Int32) -> Int32? {
   match read_fixed64(data, pos) {
     Some(v) => if v > 0x7FFFFFFFUL { None } else { Some(v.to_int()) }
     None => None
@@ -72,7 +72,7 @@ fn read_offset(data : Bytes, pos : Int) -> Int? {
 
 ///|
 /// 解码索引条目里的 block handle：`offset(varint64) + size(varint64)`。
-fn decode_handle(v : Bytes) -> (Int, Int)? {
+fn decode_handle(v : Bytes) -> (Int32, Int32)? {
   let (off, p1) = match read_varint64(v, 0, v.length()) {
     Some(pair) => pair
     None => return None
@@ -89,7 +89,7 @@ fn decode_handle(v : Bytes) -> (Int, Int)? {
 
 ///|
 /// 编码一个 block handle。
-fn encode_handle(offset : Int, size : Int) -> Bytes {
+fn encode_handle(offset : Int32, size : Int32) -> Bytes {
   let b = Buffer::Buffer()
   write_varint64(b, offset.to_uint64())
   write_varint64(b, size.to_uint64())
@@ -101,7 +101,7 @@ fn encode_handle(offset : Int, size : Int) -> Bytes {
 ///
 /// 把版本判断收在这一处，是为了不让「哪条路径用哪个解码器」散在五个调用点 ——
 /// 漏一处就会把 v1 的 block 当 v2 解，读出来的 `num_restarts` 是 CRC 的字节。
-fn decode_block_ver(raw : Bytes, version : Int) -> Block? {
+fn decode_block_ver(raw : Bytes, version : Int32) -> Block? {
   if version >= SST_VERSION {
     decode_block(raw)
   } else {
@@ -111,7 +111,7 @@ fn decode_block_ver(raw : Bytes, version : Int) -> Block? {
 
 ///|
 /// filter 也一样按版本挑解码器（v2 有尾部 CRC）。
-fn decode_bloom_ver(raw : Bytes, version : Int) -> BloomFilter? {
+fn decode_bloom_ver(raw : Bytes, version : Int32) -> BloomFilter? {
   if version >= SST_VERSION {
     decode_bloom(raw)
   } else {
@@ -133,13 +133,13 @@ pub struct SstWriter {
   out : Buffer
   block : BlockBuilder
   index : BlockBuilder
-  mut count : Int
-  mut block_count : Int
+  mut count : Int32
+  mut block_count : Int32
   mut smallest_seq : UInt64
   keys : Array[Bytes]
   /// 要写出的格式版本。生产路径恒为 `SST_VERSION`；
   /// 只有兼容性测试会把它设成 `SST_VERSION_V1` 来造老文件。
-  version : Int
+  version : Int32
 }
 
 ///|
@@ -150,7 +150,7 @@ pub fn SstWriter::new() -> SstWriter {
 ///|
 /// 按指定版本造 writer。生产路径只有 `new()`（v2）；
 /// 兼容性测试用 `with_version(SST_VERSION_V1)` 造 v1 老文件。
-fn SstWriter::with_version(version : Int) -> SstWriter {
+fn SstWriter::with_version(version : Int32) -> SstWriter {
   {
     out: Buffer::Buffer(),
     block: BlockBuilder::new(),
@@ -165,13 +165,13 @@ fn SstWriter::with_version(version : Int) -> SstWriter {
 
 ///|
 /// 已写入的条目数。
-pub fn SstWriter::entry_count(self : SstWriter) -> Int {
+pub fn SstWriter::entry_count(self : SstWriter) -> Int32 {
   self.count
 }
 
 ///|
 /// 已封盘的 data block 数。
-pub fn SstWriter::block_count(self : SstWriter) -> Int {
+pub fn SstWriter::block_count(self : SstWriter) -> Int32 {
   self.block_count
 }
 
@@ -384,7 +384,7 @@ pub fn SstReader::footer(self : SstReader) -> SstFooter {
 
 ///|
 /// data block 个数（等于索引条目数）。
-pub fn SstReader::block_count(self : SstReader) -> Int raise LsmError {
+pub fn SstReader::block_count(self : SstReader) -> Int32 raise LsmError {
   self.index.entries().length()
 }
 
@@ -435,7 +435,8 @@ pub fn SstReader::get_hashed(
   if off + size > self.data.length() {
     return None
   }
-  let blk = match decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
+  let blk = match
+    decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
     Some(b) => b
     None => return None
   }
@@ -457,7 +458,11 @@ pub fn SstReader::entries(self : SstReader) -> Array[Entry] raise LsmError {
     if off + size > self.data.length() {
       raise LsmError::corruption("sst: data block 越界")
     }
-    let blk = match decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
+    let blk = match
+      decode_block_ver(
+        self.data[off:off + size].to_owned(),
+        self.footer.version,
+      ) {
       Some(b) => b
       None => raise LsmError::corruption("sst: data block 解码失败")
     }
@@ -530,7 +535,11 @@ pub fn SstReader::scan_range(
     if off + size > self.data.length() {
       raise LsmError::corruption("sst: data block 越界")
     }
-    let blk = match decode_block_ver(self.data[off:off + size].to_owned(), self.footer.version) {
+    let blk = match
+      decode_block_ver(
+        self.data[off:off + size].to_owned(),
+        self.footer.version,
+      ) {
       Some(b) => b
       None => raise LsmError::corruption("sst: data block 解码失败")
     }

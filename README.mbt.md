@@ -38,7 +38,7 @@ put(k, v)
 
 ## 示例
 
-```moonbit
+```moonbit nocheck
 let db = @moonlsm.Db::open(@moonlsm.NativeStorage::new("./data"), 8 * 1024 * 1024)
 
 let seq = db.put(b"key", b"value")   // 返回即代表已落盘（fsync 已成功）
@@ -52,7 +52,7 @@ db.close()
 
 批量写走组提交，一批只 fsync 一次：
 
-```moonbit
+```moonbit nocheck
 for i in 0..<200 {
   db.put_deferred(key(i), value(i)) |> ignore
 }

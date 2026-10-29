@@ -24,10 +24,10 @@
 const WAL_MAGIC : Bytes = b"MWAL"
 
 ///|
-pub const WAL_VERSION : Int = 1
+pub const WAL_VERSION : Int32 = 1
 
 ///|
-pub const WAL_HEADER_SIZE : Int = 8
+pub const WAL_HEADER_SIZE : Int32 = 8
 
 ///|
 /// 单帧 payload 上限（64 MiB）。
@@ -35,18 +35,18 @@ pub const WAL_HEADER_SIZE : Int = 8
 /// 必须有这个上限：`length` 是磁盘上读来的，一个坏值（比如 0x7FFFFFFF）
 /// 会让恢复过程尝试分配 2 GB 内存，直接 OOM。这不是理论风险，
 /// 是「尾部有半条记录」时最容易踩到的一种表现。
-pub const WAL_MAX_RECORD : Int = 64 * 1024 * 1024
+pub const WAL_MAX_RECORD : Int32 = 64 * 1024 * 1024
 
 ///|
 /// 帧类型：完整记录。`0x00` / `0x02` 保留给未来的分片首段/续段。
-const FRAME_FULL : Int = 0x01
+const FRAME_FULL : Int32 = 0x01
 
 ///|
 /// payload 里的操作码。
-const OP_PUT : Int = 0x00
+const OP_PUT : Int32 = 0x00
 
 ///|
-const OP_DELETE : Int = 0x01
+const OP_DELETE : Int32 = 0x01
 
 ///|
 /// 写 WAL。当前产出的是完整文件字节，落盘由边界层负责。
@@ -67,7 +67,7 @@ pub fn WalWriter::new() -> WalWriter {
 
 ///|
 /// 已写入的字节数（含文件头）。
-pub fn WalWriter::size(self : WalWriter) -> Int {
+pub fn WalWriter::size(self : WalWriter) -> Int32 {
   self.out.length()
 }
 
@@ -122,7 +122,7 @@ pub struct WalReplay {
   /// 为什么要截断而不是「忽略尾部坏数据继续用」：
   /// 下次追加会写在坏帧后面，那段坏字节永远留在文件中间，
   /// 以后每次恢复都会在同一处停下，后面的数据永远读不到。
-  good_bytes : Int
+  good_bytes : Int32
   /// 是否发现尾部损坏（需要截断）。
   truncated : Bool
   /// 文件头是否合法。false 表示这不是一个 WAL 文件。
@@ -131,7 +131,7 @@ pub struct WalReplay {
 
 ///|
 /// 记录条数。
-pub fn WalReplay::len(self : WalReplay) -> Int {
+pub fn WalReplay::len(self : WalReplay) -> Int32 {
   self.records.length()
 }
 
@@ -146,7 +146,7 @@ pub fn WalReplay::header_ok(self : WalReplay) -> Bool {
 }
 
 ///|
-pub fn WalReplay::good_bytes(self : WalReplay) -> Int {
+pub fn WalReplay::good_bytes(self : WalReplay) -> Int32 {
   self.good_bytes
 }
 
@@ -157,7 +157,7 @@ pub fn WalReplay::records(self : WalReplay) -> Array[WalRecord] {
 
 ///|
 /// 解一帧的 payload。任何结构不符都返回 `None`。
-fn decode_payload(data : Bytes, start : Int, len : Int) -> WalRecord? {
+fn decode_payload(data : Bytes, start : Int32, len : Int32) -> WalRecord? {
   let end = start + len
   let (seq, p1) = match read_varint64(data, start, end) {
     Some(pair) => pair
@@ -281,7 +281,7 @@ pub fn WalReplay::replay_into(
   self : WalReplay,
   mem : MemTable,
   min_seq : UInt64,
-) -> Int {
+) -> Int32 {
   let mut applied = 0
   for rec in self.records {
     if rec.seq > min_seq {

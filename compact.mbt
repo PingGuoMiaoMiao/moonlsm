@@ -42,7 +42,7 @@
 
 ///|
 /// 层数。L0 / L1 / L2，`NUM_LEVELS - 1` 是最底层。
-pub const NUM_LEVELS : Int = 3
+pub const NUM_LEVELS : Int32 = 3
 
 ///|
 /// L0 的 SST 个数达到这个值就归并到 L1。
@@ -51,7 +51,7 @@ pub const NUM_LEVELS : Int = 3
 /// 太大则读放大上升。4 是 LevelDB 的默认值附近，且在 v1 的测试规模下
 /// 不会频繁触发 —— 让 compaction 成为「可观测的偶发事件」比
 /// 「一直在后台跑」更容易在测试里定位问题。
-pub const L0_COMPACT_TRIGGER : Int = 4
+pub const L0_COMPACT_TRIGGER : Int32 = 4
 
 ///|
 /// L1 的容量上限。超过就把 L1 整个并进 L2。
@@ -73,11 +73,11 @@ const LEVEL_FANOUT : UInt64 = 10UL
 ///
 /// 单个文件太大：一次读要解出整个文件（v1 的 `SstReader` 是全量加载）。
 /// 太小：文件数暴涨，L1 的二分查找收益被文件打开开销吃掉。
-const COMPACT_TARGET_SST : Int = 1 << 20
+const COMPACT_TARGET_SST : Int32 = 1 << 20
 
 ///|
 /// 第 `lv` 层的容量上限。L0 返回 0 —— 它按文件个数触发，不看字节数。
-pub fn level_target_bytes(lv : Int) -> UInt64 {
+pub fn level_target_bytes(lv : Int32) -> UInt64 {
   if lv <= 0 {
     return 0UL
   }
@@ -92,7 +92,7 @@ pub fn level_target_bytes(lv : Int) -> UInt64 {
 
 ///|
 /// 最底层不再往下沉 —— 它的数据要等到被覆盖写或删除才会消失。
-pub fn is_bottom_level(lv : Int) -> Bool {
+pub fn is_bottom_level(lv : Int32) -> Bool {
   lv == NUM_LEVELS - 1
 }
 
@@ -102,7 +102,11 @@ pub fn is_bottom_level(lv : Int) -> Bool {
 /// **纯策略函数，不做任何 IO。** 单独抽出来是为了能用任意数字做单测：
 /// 「L1 超过 1 MiB 就下沉」这条规则如果用真数据测，得先写 1 MiB，
 /// 而验证边界（`>=` 还是 `>`）要写两个 1 MiB 的库。
-pub fn should_compact_level(lv : Int, sst_count : Int, bytes : UInt64) -> Bool {
+pub fn should_compact_level(
+  lv : Int32,
+  sst_count : Int32,
+  bytes : UInt64,
+) -> Bool {
   // 最底层没有下层可去；越界的层号一律不归并（宁可不做，也不要越界写）
   if lv < 0 || lv >= NUM_LEVELS - 1 {
     return false
@@ -122,7 +126,11 @@ pub fn should_compact_level(lv : Int, sst_count : Int, bytes : UInt64) -> Bool {
 /// 反过来（先看 L1）会让刚被 L0 推下来的数据多等一轮 flush 才下沉。
 pub fn[S : Storage] Db::maybe_compact(self : Db[S]) -> Unit raise LsmError {
   for lv in 0..<(NUM_LEVELS - 1) {
-    if should_compact_level(lv, self.version.level(lv).length(), self.version.level_bytes(lv)) {
+    if should_compact_level(
+        lv,
+        self.version.level(lv).length(),
+        self.version.level_bytes(lv),
+      ) {
       self.compact_level(lv)
     }
   }
@@ -159,7 +167,10 @@ pub fn[S : Storage] Db::compact_l0(self : Db[S]) -> Unit raise LsmError {
 ///
 /// **第 6 步必须在第 5 步之后。** 提前删输入文件的话，一旦 5 失败，
 /// 旧 MANIFEST 引用的文件已经没了 —— 数据库直接打不开。
-pub fn[S : Storage] Db::compact_level(self : Db[S], src : Int) -> Unit raise LsmError {
+pub fn[S : Storage] Db::compact_level(
+  self : Db[S],
+  src : Int32,
+) -> Unit raise LsmError {
   self.ensure_open()
   if src < 0 || src >= NUM_LEVELS - 1 {
     return
@@ -258,7 +269,7 @@ pub fn[S : Storage] Db::compact_level(self : Db[S], src : Int) -> Unit raise Lsm
         )
     }
     outs.push(SstMeta::new(num, raw.length().to_uint64(), first_key, last_key))
-    out_readers.push({ num, reader })
+    out_readers.push({ num, reader, })
   }
 
   // ---- 4. 更新 version ----
@@ -327,7 +338,7 @@ fn[S] Db::reload_sst_view(
     while i > 0 {
       i = i - 1
       let num = files[i].number
-      next.push({ num, reader: self.find_reader(num) })
+      next.push({ num, reader: self.find_reader(num), })
     }
   }
   self.ssts.clear()

@@ -18,13 +18,13 @@
 
 ///|
 /// 每 16 条 entry 一个 restart point（格式规范 §3.2，与 LevelDB 一致）。
-const RESTART_INTERVAL : Int = 16
+const RESTART_INTERVAL : Int32 = 16
 
 ///|
 /// data block 的目标大小。超过它就切下一块（切点必须落在 entry 边界）。
 /// 4 KiB 是 LevelDB / RocksDB 的默认值，也是「一次读放大」与
 /// 「索引条目数」之间的平衡点。
-pub const BLOCK_TARGET_SIZE : Int = 4096
+pub const BLOCK_TARGET_SIZE : Int32 = 4096
 
 ///|
 /// block 尾部 CRC 的长度（v2 起）。校验范围是**它之前的所有字节** ——
@@ -32,7 +32,7 @@ pub const BLOCK_TARGET_SIZE : Int = 4096
 ///
 /// 只保护 entry 区是不够的：`num_restarts` 被改成一个仍然能通过边界检查的值时，
 /// 读端会把 entry 区当 restart 数组读，得到一个「结构合法但内容错乱」的 block。
-pub const BLOCK_CRC_SIZE : Int = 4
+pub const BLOCK_CRC_SIZE : Int32 = 4
 
 ///|
 /// 解码过程中间态：比 `Entry` 多一个 `next`，
@@ -43,12 +43,12 @@ priv struct DecodedEntry {
   value : Bytes
   seq : UInt64
   deleted : Bool
-  next : Int
+  next : Int32
 }
 
 ///|
 /// 两个 Bytes 的公共前缀长度。
-fn common_prefix_len(a : Bytes, b : Bytes) -> Int {
+fn common_prefix_len(a : Bytes, b : Bytes) -> Int32 {
   let n = if a.length() < b.length() { a.length() } else { b.length() }
   let mut i = 0
   while i < n && a[i] == b[i] {
@@ -65,10 +65,10 @@ fn common_prefix_len(a : Bytes, b : Bytes) -> Int {
 /// 让它早点炸比让它写进磁盘好。
 pub struct BlockBuilder {
   mut buf : Buffer
-  mut restarts : Array[Int]
-  mut counter : Int
+  mut restarts : Array[Int32]
+  mut counter : Int32
   mut last_key : Bytes
-  mut count : Int
+  mut count : Int32
 }
 
 ///|
@@ -80,7 +80,7 @@ pub fn BlockBuilder::new() -> BlockBuilder {
 
 ///|
 /// 已追加的条目数。
-pub fn BlockBuilder::entry_count(self : BlockBuilder) -> Int {
+pub fn BlockBuilder::entry_count(self : BlockBuilder) -> Int32 {
   self.count
 }
 
@@ -101,7 +101,7 @@ pub fn BlockBuilder::is_empty(self : BlockBuilder) -> Bool {
 /// 估算编码后的字节数（含 restart 数组、计数与 CRC），用于判断是否该切块。
 /// 估算而不是精确值：restart 数组长度依赖 counter，这里按当前状态算，
 /// 差几个字节不影响「是否超过 4 KiB」的判断。
-pub fn BlockBuilder::estimated_size(self : BlockBuilder) -> Int {
+pub fn BlockBuilder::estimated_size(self : BlockBuilder) -> Int32 {
   self.buf.length() + self.restarts.length() * 4 + 8
 }
 
@@ -198,10 +198,10 @@ pub fn BlockBuilder::reset(self : BlockBuilder) -> Unit {
 /// 一个已编码的 block。持有原始字节，按需解码。
 pub struct Block {
   data : Bytes
-  restarts : Array[Int]
+  restarts : Array[Int32]
   /// entry 区的结束位置，也就是 restart 数组的起点。
   /// 所有解码都必须以它为硬边界，否则会把 restart 数组当 entry 读。
-  limit : Int
+  limit : Int32
 }
 
 ///|
@@ -247,7 +247,7 @@ pub fn decode_block_v1(raw : Bytes) -> Block? {
 /// 全量预解码会让「读一个 key」退化成「扫整个 block」，
 /// 而 LSM 的读路径最忌讳这个。
 /// v2 之所以还敢这么懒，是因为 CRC 已经在入口处把「内容被改坏」拦掉了。
-fn parse_block(raw : Bytes, end : Int) -> Block? {
+fn parse_block(raw : Bytes, end : Int32) -> Block? {
   if end < 4 {
     return None
   }
@@ -263,7 +263,7 @@ fn parse_block(raw : Bytes, end : Int) -> Block? {
   if restarts_start < 0 {
     return None
   }
-  let restarts : Array[Int] = []
+  let restarts : Array[Int32] = []
   for i in 0..<num_restarts {
     let off = match read_fixed32(raw, restarts_start + i * 4) {
       Some(v) => v
@@ -279,7 +279,7 @@ fn parse_block(raw : Bytes, end : Int) -> Block? {
 
 ///|
 /// restart 点个数。
-pub fn Block::num_restarts(self : Block) -> Int {
+pub fn Block::num_restarts(self : Block) -> Int32 {
   self.restarts.length()
 }
 
@@ -290,7 +290,7 @@ pub fn Block::num_restarts(self : Block) -> Int {
 /// 这条路径上输入来自磁盘，必须假设它是恶意的或损坏的。
 fn Block::read_entry_at(
   self : Block,
-  pos : Int,
+  pos : Int32,
   prev_key : Bytes,
 ) -> DecodedEntry? {
   if pos < 0 || pos >= self.limit {
@@ -383,7 +383,7 @@ pub fn Block::entries(self : Block) -> Array[Entry] raise LsmError {
 ///|
 /// 取第 `idx` 个 restart 点的首 key。
 /// restart 点的 `shared` 恒为 0，所以可以用空 key 作为 `prev_key`。
-fn Block::restart_first_key(self : Block, idx : Int) -> Bytes? {
+fn Block::restart_first_key(self : Block, idx : Int32) -> Bytes? {
   if idx < 0 || idx >= self.restarts.length() {
     return None
   }
@@ -399,7 +399,7 @@ fn Block::restart_first_key(self : Block, idx : Int) -> Bytes? {
 /// `get` 与 `seek` 共用这一段。**故意抽出来**：这是整个 block 里
 /// 唯一一处二分逻辑，写两份的话，某天只改了其中一份就会得到
 /// 「精确查找对、下界查找错」这种极难发现的偏差。
-fn Block::restart_index_for(self : Block, target : Bytes) -> Int? {
+fn Block::restart_index_for(self : Block, target : Bytes) -> Int32? {
   let n = self.restarts.length()
   if n == 0 {
     return None
@@ -517,12 +517,7 @@ pub fn Block::last(self : Block) -> Entry? {
       Some(e) => e
       None => return found
     }
-    found = Some({
-      key: e.key,
-      value: e.value,
-      seq: e.seq,
-      deleted: e.deleted,
-    })
+    found = Some({ key: e.key, value: e.value, seq: e.seq, deleted: e.deleted, })
     prev = e.key
     pos = e.next
   }
@@ -540,12 +535,7 @@ pub fn Block::first(self : Block) -> Entry? {
   }
   match self.read_entry_at(self.restarts[0], b"") {
     Some(e) =>
-      Some({
-        key: e.key,
-        value: e.value,
-        seq: e.seq,
-        deleted: e.deleted,
-      })
+      Some({ key: e.key, value: e.value, seq: e.seq, deleted: e.deleted, })
     None => None
   }
 }

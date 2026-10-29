@@ -15,7 +15,7 @@
 /// 里读出来的字节序列是「已经落盘的事实」，原地改它只会制造
 /// 「校验时是好的、用的时候是坏的」这种最难查的 bug。
 /// 要坏数据就显式造一份坏的。
-fn flip(b : Bytes, at : Int, value : Byte) -> Bytes {
+fn flip(b : Bytes, at : Int32, value : Byte) -> Bytes {
   let buf = Buffer::Buffer()
   buf.write_bytes(b[:at])
   buf.write_byte(value)
@@ -34,7 +34,10 @@ fn sample_version() -> Version {
   // L0：两个范围重叠的文件（L0 允许重叠）
   v.set_level(0, [mk_sst(3UL, 100UL, "a", "m"), mk_sst(5UL, 200UL, "d", "z")])
   // L1：范围严格不重叠
-  v.set_level(1, [mk_sst(9UL, 300UL, "aa", "bb"), mk_sst(10UL, 400UL, "cc", "dd")])
+  v.set_level(1, [
+    mk_sst(9UL, 300UL, "aa", "bb"),
+    mk_sst(10UL, 400UL, "cc", "dd"),
+  ])
   v
 }
 
@@ -198,21 +201,21 @@ test "manifest: 合法版本的 check_invariants 为真" {
 ///|
 test "manifest: log_number >= next_file_number 时违反不变量" {
   let v = Version::with_header(0UL, 10UL, 10UL)
-  assert_true(!(v.check_invariants()))
+  assert_true(!v.check_invariants())
 }
 
 ///|
 test "manifest: L1 同层重叠时违反不变量" {
   let v = Version::new()
   v.set_level(1, [mk_sst(3UL, 100UL, "a", "m"), mk_sst(4UL, 100UL, "k", "z")])
-  assert_true(!(v.check_invariants()))
+  assert_true(!v.check_invariants())
 }
 
 ///|
 test "manifest: L1 同层乱序时违反不变量" {
   let v = Version::new()
   v.set_level(1, [mk_sst(3UL, 100UL, "m", "z"), mk_sst(4UL, 100UL, "a", "d")])
-  assert_true(!(v.check_invariants()))
+  assert_true(!v.check_invariants())
 }
 
 ///|
@@ -220,7 +223,8 @@ test "manifest: L0 允许重叠（来自不同时刻的 memtable）" {
   let v = Version::new()
   // 三个文件范围全部覆盖 "m"
   v.set_level(0, [
-    mk_sst(3UL, 100UL, "a", "z"), mk_sst(4UL, 100UL, "b", "y"),
+    mk_sst(3UL, 100UL, "a", "z"),
+    mk_sst(4UL, 100UL, "b", "y"),
     mk_sst(5UL, 100UL, "m", "m"),
   ])
   assert_true(v.check_invariants())

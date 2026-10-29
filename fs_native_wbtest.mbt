@@ -86,7 +86,9 @@ test "storage: NativeStorage append_frames 与逐次 append 结果完全一致" 
   let a = fresh_dir("frames_loop")
   let b = fresh_dir("frames_batch")
   let chunks : Array[Bytes] = [
-    bytes_of_str("AAA"), bytes_of_str(""), bytes_of_str("BB"),
+    bytes_of_str("AAA"),
+    bytes_of_str(""),
+    bytes_of_str("BB"),
     bytes_of_str("CCCC"),
   ]
   Storage::write_file(a, "log.bin", bytes_of_str("HEAD"))
@@ -306,18 +308,14 @@ test "storage: 常开句柄不影响「对不存在的文件 fsync 要报错」"
   // 那是恢复路径上区分「没写过」和「写坏了」的唯一信号。
   let st = fresh_dir("cache_sync_missing")
   let mut raised = false
-  try {
-    Storage::sync_file(st, "nope.bin")
-  } catch {
+  Storage::sync_file(st, "nope.bin") catch {
     _ => raised = true
   }
   assert_true(raised)
   // 已经为别的文件缓存了句柄时，这条仍然要成立
   Storage::append_file(st, "log.bin", bytes_of_str("x"))
   let mut raised2 = false
-  try {
-    Storage::sync_file(st, "nope2.bin")
-  } catch {
+  Storage::sync_file(st, "nope2.bin") catch {
     _ => raised2 = true
   }
   assert_true(raised2)

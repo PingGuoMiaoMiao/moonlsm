@@ -168,7 +168,9 @@ test "storage: append_frames 与逐次 append 结果完全一致" {
   let a = MemStorage::new()
   let b = MemStorage::new()
   let chunks : Array[Bytes] = [
-    bytes_of_str("AAA"), bytes_of_str(""), bytes_of_str("BB"),
+    bytes_of_str("AAA"),
+    bytes_of_str(""),
+    bytes_of_str("BB"),
     bytes_of_str("CCCC"),
   ]
   Storage::write_file(a, "WAL-1", bytes_of_str("HEAD"))

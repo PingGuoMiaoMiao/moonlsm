@@ -33,26 +33,26 @@
 const MANIFEST_MAGIC : Bytes = b"MMAN"
 
 ///|
-pub const MANIFEST_VERSION : Int = 1
+pub const MANIFEST_VERSION : Int32 = 1
 
 ///|
 /// 文件头 8 字节 + CRC 4 字节。低于这个长度连空快照都装不下。
-const MANIFEST_MIN_SIZE : Int = 12
+const MANIFEST_MIN_SIZE : Int32 = 12
 
 ///|
 /// 层数上限。**必须有一个上限**：`num_levels` 是磁盘上读来的，
 /// 一个坏值（比如 0x7FFFFFFF）会让解码尝试分配几十 GB 的数组。
 /// 真要用到 64 层，说明分层比例设计得离谱，那时再改这个常量。
-const MANIFEST_MAX_LEVELS : Int = 64
+const MANIFEST_MAX_LEVELS : Int32 = 64
 
 ///|
 /// 单层 SST 数量上限，同理防止坏数据导致的巨额分配。
-const MANIFEST_MAX_SSTS_PER_LEVEL : Int = 1 << 20
+const MANIFEST_MAX_SSTS_PER_LEVEL : Int32 = 1 << 20
 
 ///|
 /// key 长度上限（16 MiB）。key 是任意二进制，但一个 16 MiB 的 key
 /// 本身就已经是设计错误了。
-const MANIFEST_MAX_KEY : Int = 16 * 1024 * 1024
+const MANIFEST_MAX_KEY : Int32 = 16 * 1024 * 1024
 
 ///|
 /// 一个 SST 的元信息。**不含内容**——内容在 `sst/<n>.sst` 里。
@@ -73,7 +73,7 @@ pub fn SstMeta::new(
   smallest : Bytes,
   largest : Bytes,
 ) -> SstMeta {
-  { number, file_size, smallest, largest }
+  { number, file_size, smallest, largest, }
 }
 
 ///|
@@ -97,12 +97,7 @@ pub struct Version {
 /// 新建一个空版本。`log_number` / `next_file_number` 从 1 开始，
 /// 0 留给「还没有任何文件」这个状态。
 pub fn Version::new() -> Version {
-  {
-    last_seq: 0UL,
-    log_number: 1UL,
-    next_file_number: 2UL,
-    levels: [[]],
-  }
+  { last_seq: 0UL, log_number: 1UL, next_file_number: 2UL, levels: [[]], }
 }
 
 ///|
@@ -117,18 +112,13 @@ pub fn Version::with_header(
   log_number : UInt64,
   next_file_number : UInt64,
 ) -> Version {
-  {
-    last_seq,
-    log_number,
-    next_file_number,
-    levels: [[]],
-  }
+  { last_seq, log_number, next_file_number, levels: [[]], }
 }
 
 ///|
 /// 取某一层的 SST 列表。层不存在时返回空数组而不是 panic ——
 /// 「这一层还没有文件」是正常状态，不是错误。
-pub fn Version::level(self : Version, idx : Int) -> Array[SstMeta] {
+pub fn Version::level(self : Version, idx : Int32) -> Array[SstMeta] {
   if idx < 0 || idx >= self.levels.length() {
     return []
   }
@@ -137,13 +127,13 @@ pub fn Version::level(self : Version, idx : Int) -> Array[SstMeta] {
 
 ///|
 /// 层数。
-pub fn Version::level_count(self : Version) -> Int {
+pub fn Version::level_count(self : Version) -> Int32 {
   self.levels.length()
 }
 
 ///|
 /// 全部 SST 总数。
-pub fn Version::total_ssts(self : Version) -> Int {
+pub fn Version::total_ssts(self : Version) -> Int32 {
   let mut n = 0
   for lv in self.levels {
     n = n + lv.length()
@@ -158,7 +148,7 @@ pub fn Version::total_ssts(self : Version) -> Int {
 /// L0 的文件大小由 memtable 上限决定，个数就能代表体量；而 L1 及以下
 /// 的文件是按 `COMPACT_TARGET_SST` 切的，个数多只说明数据多，
 /// 真正决定「这层该不该往下沉」的是总字节数。
-pub fn Version::level_bytes(self : Version, idx : Int) -> UInt64 {
+pub fn Version::level_bytes(self : Version, idx : Int32) -> UInt64 {
   let mut total = 0UL
   for m in self.level(idx) {
     total = total + m.file_size
@@ -179,7 +169,11 @@ pub fn Version::alloc_file_number(self : Version) -> UInt64 {
 ///
 /// 传入的数组会被复制一份：调用方后面可能还要改动自己的数组，
 /// 如果这里直接持有引用，「版本快照」就不再是快照了。
-pub fn Version::set_level(self : Version, idx : Int, ssts : Array[SstMeta]) -> Unit {
+pub fn Version::set_level(
+  self : Version,
+  idx : Int32,
+  ssts : Array[SstMeta],
+) -> Unit {
   while self.levels.length() <= idx {
     self.levels.push([])
   }
@@ -195,7 +189,11 @@ pub fn Version::set_level(self : Version, idx : Int, ssts : Array[SstMeta]) -> U
 ///
 /// 追加到 L0 的顺序就是「从旧到新」—— 所以 `Db` 加载时要**倒序**遍历，
 /// 才能让 `get` 的短路优化先看到最新的文件。
-pub fn Version::push_to_level(self : Version, idx : Int, meta : SstMeta) -> Unit {
+pub fn Version::push_to_level(
+  self : Version,
+  idx : Int32,
+  meta : SstMeta,
+) -> Unit {
   while self.levels.length() <= idx {
     self.levels.push([])
   }
@@ -370,17 +368,12 @@ pub fn decode_manifest(data : Bytes) -> Version? {
   if pos != limit {
     return None
   }
-  Some({
-    last_seq,
-    log_number,
-    next_file_number,
-    levels,
-  })
+  Some({ last_seq, log_number, next_file_number, levels, })
 }
 
 ///|
 /// 读一个「长度前缀 + 内容」的 key。返回 `(key, 新位置)`。
-fn read_key(data : Bytes, pos : Int, limit : Int) -> (Bytes, Int)? {
+fn read_key(data : Bytes, pos : Int32, limit : Int32) -> (Bytes, Int32)? {
   let len = match read_varint32(data, pos, limit) {
     Some(p) => p
     None => return None

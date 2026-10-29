@@ -10,7 +10,7 @@
 
 ///|
 /// 把一串整数当字节拼起来，用于构造期望的字节序列。
-fn bytes_of(xs : Array[Int]) -> Bytes {
+fn bytes_of(xs : Array[Int32]) -> Bytes {
   let b = Buffer::Buffer()
   for x in xs {
     b.write_byte(x.to_byte())
@@ -31,7 +31,7 @@ fn assert_bytes_eq(got : Bytes, want : Bytes) -> Unit raise {
 ///|
 test "varint32: 已知编码逐字节符合规范" {
   // 期望值来自 LEB128 定义，不是「我跑出来是什么就是什么」
-  let cases : Array[(Int, Array[Int])] = [
+  let cases : Array[(Int32, Array[Int32])] = [
     (0, [0x00]),
     (1, [0x01]),
     (127, [0x7F]),
@@ -53,7 +53,7 @@ test "varint32: 已知编码逐字节符合规范" {
 
 ///|
 test "varint32: 边界值往返且 varint32_len 与实际长度一致" {
-  let values : Array[Int] = [
+  let values : Array[Int32] = [
     0, 1, 2, 126, 127, 128, 129, 255, 256, 300, 16382, 16383, 16384, 16385, 2097151,
     2097152, 268435455, 268435456, 2147483647,
   ]

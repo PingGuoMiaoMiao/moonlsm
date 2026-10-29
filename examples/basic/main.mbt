@@ -9,7 +9,6 @@
 ///
 /// 想看归并发生：把下面的 memtable 阈值改成 64 KiB，循环写几万条，
 /// 然后在程序运行期间看 ./example_data/sst/ 里的文件数变化。
-
 fn main raise {
   let data_dir = "./example_data"
 
@@ -58,7 +57,9 @@ fn main raise {
   // 5. 范围扫描，左闭右开 [start, end)。limit 是上限，不是精确条数。
   // ---------------------------------------------------------------------
   let rows = db.scan(b"user:", b"user;", 10)
-  println("扫描 [user:, user;) 得到 " + rows.length().to_string() + " 条：")
+  println(
+    "扫描 [user:, user;) 得到 " + rows.length().to_string() + " 条：",
+  )
   for p in rows {
     let k = @utf8.decode_lossy(p.key)
     let v = @utf8.decode_lossy(p.value)
@@ -87,5 +88,7 @@ fn main raise {
   //    想看 SST 生成，就在中间调一次 db.flush()。
   // ---------------------------------------------------------------------
   db.close()
-  println("已关闭。重新运行这个示例，上面这些 key 仍然读得到。")
+  println(
+    "已关闭。重新运行这个示例，上面这些 key 仍然读得到。",
+  )
 }

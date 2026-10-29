@@ -21,11 +21,11 @@
 ///|
 /// 每个元素分配多少位。10 bit 配 7 个哈希，理论误判率 0.82%。
 /// 实测见 `bloom_wbtest.mbt` 与 `docs/engineering/BENCHMARK.md`。
-const BLOOM_BITS_PER_KEY : Int = 10
+const BLOOM_BITS_PER_KEY : Int32 = 10
 
 ///|
 /// 哈希个数。最优值是 `bits_per_key * ln2`，10 bit 对应 6.93，取 7。
-const BLOOM_K : Int = 7
+const BLOOM_K : Int32 = 7
 
 ///|
 /// 位图在内存里就是打包好的字节，与磁盘布局一一对应。
@@ -33,8 +33,8 @@ const BLOOM_K : Int = 7
 /// 探测时只能落在 `[0, num_bits)` 内。
 pub struct BloomFilter {
   bits : Array[Byte]
-  num_bits : Int
-  k : Int
+  num_bits : Int32
+  k : Int32
 }
 
 ///|
@@ -83,14 +83,14 @@ pub fn bloom_hashes(key : Bytes) -> (UInt64, UInt64) {
 /// `h1 + i * h2` 是双哈希；`(x & 0xFFFFFFFF) * n >> 32` 是 fastrange ——
 /// 把 32 位无符号值均匀映射到 `[0, n)`，等价于 `x * n / 2^32`，
 /// 但只用一次乘法而不是一次除法。`n <= 2^24` 时乘积不超过 2^56，不会溢出。
-fn probe_index(h1 : UInt64, h2 : UInt64, i : Int, n : UInt64) -> Int {
+fn probe_index(h1 : UInt64, h2 : UInt64, i : Int32, n : UInt64) -> Int32 {
   let x = h1 + i.to_uint64() * h2
   (((x & 0xFFFFFFFFUL) * n) >> 32).to_int()
 }
 
 ///|
 /// `expected` 是预期元素个数，按默认参数（10 bit / 7 哈希）建 filter。
-pub fn BloomFilter::new(expected : Int) -> BloomFilter {
+pub fn BloomFilter::new(expected : Int32) -> BloomFilter {
   BloomFilter::new_with(expected, BLOOM_BITS_PER_KEY, BLOOM_K)
 }
 
@@ -100,9 +100,9 @@ pub fn BloomFilter::new(expected : Int) -> BloomFilter {
 /// 生产路径只用 `new`；`new_with` 存在的意义是让「为什么是 10 bit」
 /// 这个问题能用一组可复现的对照实验回答，而不是引用一句经验值。
 pub fn BloomFilter::new_with(
-  expected : Int,
-  bits_per_key : Int,
-  k : Int,
+  expected : Int32,
+  bits_per_key : Int32,
+  k : Int32,
 ) -> BloomFilter {
   let bpk = if bits_per_key < 1 { 1 } else { bits_per_key }
   let kk = if k < 1 { 1 } else { k }
@@ -110,19 +110,19 @@ pub fn BloomFilter::new_with(
   // 否则 n=0 时取模无意义。
   let raw = if expected < 64 { 640 } else { expected * bpk }
   // 向上取整到整字节，让内存表示与磁盘表示完全一致
-  let num_bits = ((raw + 7) / 8) * 8
-  { bits: Array::make(num_bits / 8, (0 : Byte)), num_bits, k: kk }
+  let num_bits = (raw + 7) / 8 * 8
+  { bits: Array::make(num_bits / 8, (0 : Byte)), num_bits, k: kk, }
 }
 
 ///|
-fn BloomFilter::set_bit(self : BloomFilter, idx : Int) -> Unit {
+fn BloomFilter::set_bit(self : BloomFilter, idx : Int32) -> Unit {
   let byte_idx = idx / 8
   let mask = 1 << (idx % 8)
   self.bits[byte_idx] = (self.bits[byte_idx].to_int() | mask).to_byte()
 }
 
 ///|
-fn BloomFilter::get_bit(self : BloomFilter, idx : Int) -> Bool {
+fn BloomFilter::get_bit(self : BloomFilter, idx : Int32) -> Bool {
   let byte_idx = idx / 8
   let mask = 1 << (idx % 8)
   (self.bits[byte_idx].to_int() & mask) != 0
@@ -172,19 +172,19 @@ pub fn BloomFilter::may_contain_hashes(
 
 ///|
 /// 位图总位数。给调参与统计用 —— 它决定了 filter 的空间开销。
-pub fn BloomFilter::num_bits(self : BloomFilter) -> Int {
+pub fn BloomFilter::num_bits(self : BloomFilter) -> Int32 {
   self.num_bits
 }
 
 ///|
 /// 哈希个数。
-pub fn BloomFilter::k(self : BloomFilter) -> Int {
+pub fn BloomFilter::k(self : BloomFilter) -> Int32 {
   self.k
 }
 
 ///|
 /// 已置位的 bit 数。只用于测试与统计。
-pub fn BloomFilter::popcount(self : BloomFilter) -> Int {
+pub fn BloomFilter::popcount(self : BloomFilter) -> Int32 {
   let mut total = 0
   for b in self.bits {
     let v = b.to_int()
@@ -268,7 +268,7 @@ pub fn decode_bloom_v1(data : Bytes) -> BloomFilter? {
 
 ///|
 /// `end` 指向 filter 结构结束的位置：v2 传 `n - 4`（跳过 CRC），v1 传 `n`。
-fn parse_bloom(data : Bytes, end : Int) -> BloomFilter? {
+fn parse_bloom(data : Bytes, end : Int32) -> BloomFilter? {
   if end < 2 {
     return None
   }

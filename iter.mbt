@@ -18,7 +18,7 @@
 pub struct MergeIterator {
   sources : Array[Array[Entry]]
   /// 每个来源的当前下标。到达该来源末尾即为「已耗尽」。
-  heads : Array[Int]
+  heads : Array[Int32]
 }
 
 ///|
@@ -27,7 +27,7 @@ pub struct MergeIterator {
 /// 数组的先后顺序只用于「seq 相同时取谁」这种异常情况的兜底，
 /// **不参与新旧判断** —— 新旧一律由 `seq` 决定。
 pub fn MergeIterator::new(sources : Array[Array[Entry]]) -> MergeIterator {
-  let heads : Array[Int] = []
+  let heads : Array[Int32] = []
   for _ in sources {
     heads.push(0)
   }

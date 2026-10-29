@@ -39,9 +39,9 @@ pub struct Db[S] {
   /// 从新到旧。带上编号是因为 compaction 需要知道「要删哪个文件」。
   ssts : Array[LoadedSst]
   /// memtable 字节阈值，超过就自动刷盘。
-  mem_limit : Int
+  mem_limit : Int32
   mut seq : UInt64
-  mut flush_count : Int
+  mut flush_count : Int32
   /// 版本快照：每层有哪些 SST、活跃 WAL 编号、下一个可用文件编号。
   /// 它是**唯一**的文件编号来源 —— 不要再单独维护计数器。
   mut version : Version
@@ -63,7 +63,7 @@ pub struct Db[S] {
   /// 不需要 `mut`：`Array` 是引用类型，`push`/`clear` 改的是它指向的内容，
   /// 不是字段本身。
   pending : Array[Bytes]
-  mut wal_bytes : Int
+  mut wal_bytes : Int32
   mut closed : Bool
 }
 
@@ -117,7 +117,7 @@ const MANIFEST_PREFIX : String = "MANIFEST-"
 /// 每次都立刻 fsync。要关掉它（只用于压测）用 `Db::open_with`。
 pub fn[S : Storage] Db::open(
   storage : S,
-  mem_limit : Int,
+  mem_limit : Int32,
 ) -> Db[S] raise LsmError {
   Db::open_with(storage, mem_limit, true)
 }
@@ -129,7 +129,7 @@ pub fn[S : Storage] Db::open(
 /// 性能对比实验。所有正确性测试都必须用 true。
 pub fn[S : Storage] Db::open_with(
   storage : S,
-  mem_limit : Int,
+  mem_limit : Int32,
   sync_on_write : Bool,
 ) -> Db[S] raise LsmError {
   Storage::prepare(storage)
@@ -194,7 +194,7 @@ fn[S : Storage] Db::recover(self : Db[S]) -> Unit raise LsmError {
           max_seq = e.seq
         }
       }
-      self.ssts.push({ num: meta.number, reader: r })
+      self.ssts.push({ num: meta.number, reader: r, })
     }
   }
   let wpath = self.wal_name()
@@ -308,7 +308,10 @@ fn[S : Storage] Db::load_version(self : Db[S]) -> Unit raise LsmError {
 /// 这和 `wal.mbt` 对坏数据的态度差异是刻意的：WAL 尾部的半条记录是
 /// **断电常态**，截断它不损失任何已 ack 的数据；而 MANIFEST 读不懂意味着
 /// 「不知道哪些数据是有效的」，这时任何自动决策都可能丢数据。
-fn[S : Storage] Db::read_manifest(self : Db[S], name : String) -> Version raise LsmError {
+fn[S : Storage] Db::read_manifest(
+  self : Db[S],
+  name : String,
+) -> Version raise LsmError {
   let raw = match Storage::read_file(self.storage, name) {
     Some(b) => b
     None =>
@@ -434,13 +437,13 @@ pub fn[S] Db::check_version_invariants(self : Db[S]) -> Bool {
 
 ///|
 /// 版本快照里有几层。
-pub fn[S] Db::level_count(self : Db[S]) -> Int {
+pub fn[S] Db::level_count(self : Db[S]) -> Int32 {
   self.version.level_count()
 }
 
 ///|
 /// 某一层有几个 SST。层不存在返回 0。
-pub fn[S] Db::level_sst_count(self : Db[S], idx : Int) -> Int {
+pub fn[S] Db::level_sst_count(self : Db[S], idx : Int32) -> Int32 {
   self.version.level(idx).length()
 }
 
@@ -459,10 +462,7 @@ fn[S : Storage] Db::bump_file_number_past_existing(
   for dir in [SST_DIR, WAL_DIR] {
     for name in Storage::list_files(self.storage, dir) {
       match parse_number_prefix(name) {
-        Some(n) =>
-          if n > max {
-            max = n
-          }
+        Some(n) => if n > max { max = n }
         None => ()
       }
     }
@@ -470,10 +470,7 @@ fn[S : Storage] Db::bump_file_number_past_existing(
   for f in Storage::list_files(self.storage, "") {
     if has_prefix(f, MANIFEST_PREFIX) {
       match parse_number_prefix(f[MANIFEST_PREFIX.length():].to_owned()) {
-        Some(n) =>
-          if n > max {
-            max = n
-          }
+        Some(n) => if n > max { max = n }
         None => ()
       }
     }
@@ -497,25 +494,25 @@ pub fn[S] Db::last_seq(self : Db[S]) -> UInt64 {
 }
 
 ///|
-pub fn[S] Db::sst_count(self : Db[S]) -> Int {
+pub fn[S] Db::sst_count(self : Db[S]) -> Int32 {
   self.ssts.length()
 }
 
 ///|
-pub fn[S] Db::flush_count(self : Db[S]) -> Int {
+pub fn[S] Db::flush_count(self : Db[S]) -> Int32 {
   self.flush_count
 }
 
 ///|
 /// 当前 WAL 文件字节数（含文件头）。`stats` 命令用它。
-pub fn[S] Db::wal_bytes(self : Db[S]) -> Int {
+pub fn[S] Db::wal_bytes(self : Db[S]) -> Int32 {
   self.wal_bytes
 }
 
 ///|
 /// memtable 里的条目数（含墓碑）。`stats` 命令用它区分
 /// 「内存里有多少条」和「已经刷到 SST 的有多少条」。
-pub fn[S] Db::mem_entry_count(self : Db[S]) -> Int {
+pub fn[S] Db::mem_entry_count(self : Db[S]) -> Int32 {
   self.mem.to_entries().length()
 }
 
@@ -761,7 +758,7 @@ pub fn[S : Storage] Db::flush(self : Db[S]) -> Unit raise LsmError {
     Closed => ()
   }
   // 6. 内存状态收尾
-  self.ssts.insert(0, { num: sst_num, reader })
+  self.ssts.insert(0, { num: sst_num, reader, })
   self.mem.clear()
   // `pending` 里的帧对应的记录全都在 memtable 里，也就全都进了刚落盘的
   // 这个 SST。SST 已经 fsync 过，所以这些帧可以安全丢弃 —— 不丢的话，
@@ -806,7 +803,7 @@ pub fn[S] Db::scan(
   self : Db[S],
   start : Bytes,
   end : Bytes,
-  limit : Int,
+  limit : Int32,
 ) -> Array[KvPair] raise LsmError {
   let sources : Array[Array[Entry]] = []
   sources.push(self.mem.to_entries())
@@ -848,7 +845,7 @@ pub fn[S] Db::close(self : Db[S]) -> Unit {
 
 ///|
 /// 截取前缀。`n` 越界时取全长（恢复路径上宁可多留不可少留）。
-fn take_prefix(b : Bytes, n : Int) -> Bytes {
+fn take_prefix(b : Bytes, n : Int32) -> Bytes {
   let out = Buffer::Buffer()
   let end = if n > b.length() { b.length() } else { n }
   out.write_bytes(b[:end])
@@ -856,6 +853,7 @@ fn take_prefix(b : Bytes, n : Int) -> Bytes {
 }
 
 ///|
+
 ///|
 /// 六位零填充的编号。
 ///

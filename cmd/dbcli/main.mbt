@@ -20,11 +20,12 @@
 ///
 /// 全程用 `Int` 而不是 `Int32`：本项目验证的工具链 0.1.20260827 里
 /// 根本没有 `Int32` 这个类型（它是新版才引入的）。
-extern "C" fn c_getchar() -> Int = "getchar"
+extern "C" fn c_getchar() -> Int32 = "getchar"
 
 ///|
 /// 管道模式下 stdout 是全缓冲，不主动 flush 会让测试脚本一直等。
 /// 传 0 等价于 C 的 fflush(NULL)，刷新全部输出流。
+
 ///|
 /// 从 stdin 读一行（不含换行符）。EOF 返回 None。
 ///
@@ -282,7 +283,7 @@ fn Cli::new(dir : String) -> Cli? {
       return None
     }
   }
-  Some({ db: db })
+  Some({ db, })
 }
 
 ///|
@@ -335,7 +336,9 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
                         None => ""
                       }
                       // 不逐条 fsync，末尾统一刷一次
-                      ignore(self.db.put_deferred(@utf8.encode(k), @utf8.encode(v)))
+                      ignore(
+                        self.db.put_deferred(@utf8.encode(k), @utf8.encode(v)),
+                      )
                     }
                   None => ()
                 }
@@ -363,7 +366,9 @@ fn Cli::handle(self : Cli, req : Json) -> String raise @moonlsm.LsmError {
           }
         None => 100
       }
-      "{\"ok\":true,\"items\":" + items_json(self.db.scan(start, end, limit)) + "}"
+      "{\"ok\":true,\"items\":" +
+      items_json(self.db.scan(start, end, limit)) +
+      "}"
     }
     "flush" => {
       self.db.flush()
@@ -415,6 +420,7 @@ fn dispatch(cli : Cli, line : String) -> String {
 /// 打开失败就把原因打到 stdout 并返回 None。
 /// 注意走 stdout 而不是 stderr：驱动脚本读的是 stdout 的行 JSON，
 /// 错误也要以同样的格式出现，否则脚本只会看到「进程没输出」。
+
 ///|
 fn main {
   // 数据目录：环境变量优先，默认当前目录下的 .moonlsm_data。

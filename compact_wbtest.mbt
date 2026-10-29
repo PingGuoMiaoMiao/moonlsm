@@ -18,13 +18,19 @@
 
 ///|
 /// 第 `round` 轮的第 `i` 个 key。
-fn round_key(tag : String, n : Int, round : Int, i : Int) -> String {
+fn round_key(tag : String, n : Int32, round : Int32, i : Int32) -> String {
   tag + pad_num((round * n + i).to_uint64())
 }
 
 ///|
 /// 与 `round_key` 配套的 value。把轮次写进值里，才能一眼看出读到的是哪一轮。
-fn round_val(ver : String, tag : String, n : Int, round : Int, i : Int) -> String {
+fn round_val(
+  ver : String,
+  tag : String,
+  n : Int32,
+  round : Int32,
+  i : Int32,
+) -> String {
   ver + "r" + round.to_string() + "-" + round_key(tag, n, round, i)
 }
 
@@ -33,8 +39,8 @@ fn round_val(ver : String, tag : String, n : Int, round : Int, i : Int) -> Strin
 fn[S : Storage] put_round_v(
   db : Db[S],
   tag : String,
-  n : Int,
-  round : Int,
+  n : Int32,
+  round : Int32,
   ver : String,
 ) -> Unit raise LsmError {
   for i in 0..<n {
@@ -47,8 +53,8 @@ fn[S : Storage] put_round_v(
 fn[S : Storage] put_round(
   db : Db[S],
   tag : String,
-  n : Int,
-  round : Int,
+  n : Int32,
+  round : Int32,
 ) -> Unit raise LsmError {
   put_round_v(db, tag, n, round, "")
 }
@@ -58,8 +64,8 @@ fn[S : Storage] put_round(
 fn[S : Storage] fill_round(
   db : Db[S],
   tag : String,
-  n : Int,
-  round : Int,
+  n : Int32,
+  round : Int32,
 ) -> Unit raise LsmError {
   put_round(db, tag, n, round)
   db.flush()
@@ -74,14 +80,17 @@ fn[S : Storage] fill_round(
 fn[S] assert_rounds_v(
   db : Db[S],
   tag : String,
-  n : Int,
-  rounds : Int,
+  n : Int32,
+  rounds : Int32,
   ver : String,
 ) -> Unit raise {
   for round in 0..<rounds {
     for i in 0..<n {
       let k = round_key(tag, n, round, i)
-      assert_eq(db.get(kb(k)), expect_bytes(Some(round_val(ver, tag, n, round, i))))
+      assert_eq(
+        db.get(kb(k)),
+        expect_bytes(Some(round_val(ver, tag, n, round, i))),
+      )
     }
   }
 }
@@ -90,8 +99,8 @@ fn[S] assert_rounds_v(
 fn[S] assert_rounds(
   db : Db[S],
   tag : String,
-  n : Int,
-  rounds : Int,
+  n : Int32,
+  rounds : Int32,
 ) -> Unit raise {
   assert_rounds_v(db, tag, n, rounds, "")
 }
@@ -112,7 +121,7 @@ fn[S] l1_numbers(db : Db[S]) -> Array[UInt64] {
 /// 用 `get` 判断「删掉了」是不够的：`get` 只看第一个命中的文件，
 /// 旧值可能还躺在更深层的文件里，只是被上层墓碑挡住了。
 /// 要验证「数据真的被物理清掉」，必须直接数条目。
-fn[S] count_entries(db : Db[S], key : Bytes) -> Int raise LsmError {
+fn[S] count_entries(db : Db[S], key : Bytes) -> Int32 raise LsmError {
   let mut n = 0
   for s in db.ssts {
     for e in s.reader.entries() {
@@ -460,7 +469,7 @@ test "compact: 删除后重写 —— 到最底层也不复活、不丢" {
 ///|
 /// 造一个大约 `size` 字节的 value。倍增拼接再截断：
 /// 逐次追加是 O(size²) 的字符串拷贝，4 KiB 要拷两百多次。
-fn pad_to(seed : String, size : Int) -> String {
+fn pad_to(seed : String, size : Int32) -> String {
   let mut s = seed
   while s.length() < size {
     s = s + s

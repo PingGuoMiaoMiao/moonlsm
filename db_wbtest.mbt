@@ -7,7 +7,7 @@
 ///|
 /// 用内存后端开一个库。断电语义由 `MemStorage::power_loss` 提供，
 /// 所以这一层可以在三个后端上跑，也不需要临时目录。
-fn open_mem(mem_limit : Int) -> Db[MemStorage] raise LsmError {
+fn open_mem(mem_limit : Int32) -> Db[MemStorage] raise LsmError {
   Db::open(MemStorage::new(), mem_limit)
 }
 
@@ -436,7 +436,10 @@ test "db: 组提交中途触发 flush，已 flush 的部分仍然持久" {
   st.power_loss()
   let db2 = Db::open(st, 1024)
   for i in 0..<60 {
-    assert_eq(db2.get(kb("k\{i}")), expect_bytes(Some("payload-payload-payload")))
+    assert_eq(
+      db2.get(kb("k\{i}")),
+      expect_bytes(Some("payload-payload-payload")),
+    )
   }
 }
 
@@ -649,7 +652,7 @@ test "manifest: 孤儿 SST 不影响恢复，且它的编号不会被复用" {
   // 一个编号很大的 SST 文件，但 MANIFEST 里没登记它
   let orphan_num = db.next_file_number() + 50UL
   let w = SstWriter::new()
-  w.add({ key: kb("ghost"), value: kb("boo"), seq: 9999UL, deleted: false })
+  w.add({ key: kb("ghost"), value: kb("boo"), seq: 9999UL, deleted: false, })
   Storage::write_file(st, sst_path(orphan_num), w.finish())
   Storage::sync_file(st, sst_path(orphan_num))
   st.power_loss()

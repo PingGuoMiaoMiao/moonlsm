@@ -33,14 +33,14 @@ fn TestRng::next(self : TestRng) -> UInt64 {
 }
 
 ///|
-fn TestRng::below(self : TestRng, n : Int) -> Int {
+fn TestRng::below(self : TestRng, n : Int32) -> Int32 {
   (self.next() % n.to_uint64()).to_int()
 }
 
 ///|
 /// 十进制左补零到 6 位。补零是关键：这样字符串的**字节序**与数值序一致，
 /// 否则 `"user:10" < "user:9"`，测试数据本身就不是升序的。
-fn pad6(n : Int) -> String {
+fn pad6(n : Int32) -> String {
   let s = n.to_string()
   let mut out = ""
   for _ in 0..<(6 - s.length()) {
@@ -360,7 +360,7 @@ test "block: entry 区被截断时 entries() 报错而不是返回半截数据" 
 ///
 /// `corruption_wbtest.mbt` 里有个同名的 `corrupt_at`，但那个文件有自己的
 /// `bad_byte`；白盒测试的顶层标识符在整个包里共享，所以这里换个名字。
-fn poke_block_byte(b : Bytes, at : Int) -> Bytes {
+fn poke_block_byte(b : Bytes, at : Int32) -> Bytes {
   let buf = Buffer::Buffer()
   buf.write_bytes(b[:at])
   buf.write_byte(if b[at] == 0x5A { 0x00 } else { 0x5A })

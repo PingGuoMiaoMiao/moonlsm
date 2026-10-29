@@ -77,7 +77,7 @@ pub struct KvPair {
 /// 它要求先有一个 `Entry`，而 `Entry` 带 `seq` 和墓碑标记，
 /// 对使用者来说是多余的。
 pub fn KvPair::new(key : Key, value : Value) -> KvPair {
-  { key, value }
+  { key, value, }
 }
 
 ///|

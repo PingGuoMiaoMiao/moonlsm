@@ -6,7 +6,7 @@
 /// 崩溃恢复的代码路径只有在这些输入下才会被真正执行。
 
 ///|
-fn wal_with(n : Int) -> Bytes {
+fn wal_with(n : Int32) -> Bytes {
   let w = WalWriter::new()
   for i in 0..<n {
     w.append(

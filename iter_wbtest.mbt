@@ -150,7 +150,7 @@ test "iter: 差分测试 —— 随机多来源与参考实现逐条一致" {
       let n = rng.below(40)
       let items : Array[Entry] = []
       // 每个来源内部严格升序：先取 n 个 key，排序，再去重
-      let keys : Array[Int] = []
+      let keys : Array[Int32] = []
       for _ in 0..<n {
         keys.push(rng.below(60))
       }

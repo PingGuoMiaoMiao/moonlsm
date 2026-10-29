@@ -18,7 +18,7 @@
 /// 负数在 LEB128 里没有意义（格式规范 §0 明确规定是无符号变长整数），
 /// 传负数是调用方的 bug，不是数据的问题，所以这里不静默截断成 0 ——
 /// 静默截断会让「-1 变成 0」这种错误一路走到磁盘上。
-pub fn write_varint32(buf : Buffer, value : Int) -> Unit {
+pub fn write_varint32(buf : Buffer, value : Int32) -> Unit {
   let mut x = value
   while x >= 0x80 {
     // 续位 0x80 必须置上：它表示「后面还有字节」。
@@ -43,7 +43,7 @@ pub fn write_varint64(buf : Buffer, value : UInt64) -> Unit {
 
 ///|
 /// 写 4 字节小端定长整数（格式规范 §0：所有定长整数小端序）。
-pub fn write_fixed32(buf : Buffer, value : Int) -> Unit {
+pub fn write_fixed32(buf : Buffer, value : Int32) -> Unit {
   buf.write_byte(((value >> 0) & 0xFF).to_byte())
   buf.write_byte(((value >> 8) & 0xFF).to_byte())
   buf.write_byte(((value >> 16) & 0xFF).to_byte())
@@ -52,7 +52,7 @@ pub fn write_fixed32(buf : Buffer, value : Int) -> Unit {
 
 ///|
 /// 写 2 字节小端定长整数。WAL / MANIFEST 的文件头 version 字段用它。
-pub fn write_fixed16(buf : Buffer, value : Int) -> Unit {
+pub fn write_fixed16(buf : Buffer, value : Int32) -> Unit {
   buf.write_byte((value & 0xFF).to_byte())
   buf.write_byte(((value >> 8) & 0xFF).to_byte())
 }
@@ -78,7 +78,7 @@ pub fn write_fixed64(buf : Buffer, value : UInt64) -> Unit {
 
 ///|
 /// `varint32` 编码后的字节数。用于估算 block 大小，不做实际写入。
-pub fn varint32_len(value : Int) -> Int {
+pub fn varint32_len(value : Int32) -> Int32 {
   let mut n = 1
   let mut x = value >> 7
   while x > 0 {
@@ -94,7 +94,11 @@ pub fn varint32_len(value : Int) -> Int {
 /// `limit` 是硬边界而不是 `data.length()`：调用方传入的是一段逻辑区域
 /// （比如 data block 的 entry 区，后面还跟着 restart 数组），
 /// 越过 `limit` 就等于读到了别的结构，必须当越界处理。
-pub fn read_varint32(data : Bytes, pos : Int, limit : Int) -> (Int, Int)? {
+pub fn read_varint32(
+  data : Bytes,
+  pos : Int32,
+  limit : Int32,
+) -> (Int32, Int32)? {
   let mut i = pos
   let mut shift = 0
   let mut result = 0
@@ -116,7 +120,11 @@ pub fn read_varint32(data : Bytes, pos : Int, limit : Int) -> (Int, Int)? {
 
 ///|
 /// 从 `data[pos..limit]` 读一个 `varint64`，返回 `(值, 新位置)`。
-pub fn read_varint64(data : Bytes, pos : Int, limit : Int) -> (UInt64, Int)? {
+pub fn read_varint64(
+  data : Bytes,
+  pos : Int32,
+  limit : Int32,
+) -> (UInt64, Int32)? {
   let mut i = pos
   let mut shift = 0
   let mut result = 0UL
@@ -139,7 +147,7 @@ pub fn read_varint64(data : Bytes, pos : Int, limit : Int) -> (UInt64, Int)? {
 
 ///|
 /// 从 `data[pos..]` 读 2 字节小端定长整数。
-pub fn read_fixed16(data : Bytes, pos : Int) -> Int? {
+pub fn read_fixed16(data : Bytes, pos : Int32) -> Int32? {
   if pos < 0 || pos + 2 > data.length() {
     return None
   }
@@ -148,7 +156,7 @@ pub fn read_fixed16(data : Bytes, pos : Int) -> Int? {
 
 ///|
 /// 从 `data[pos..]` 读 4 字节小端为**无符号** 32 位值（0 .. 0xFFFFFFFF）。
-pub fn read_fixed32u(data : Bytes, pos : Int) -> UInt64? {
+pub fn read_fixed32u(data : Bytes, pos : Int32) -> UInt64? {
   if pos < 0 || pos + 4 > data.length() {
     return None
   }
@@ -161,7 +169,7 @@ pub fn read_fixed32u(data : Bytes, pos : Int) -> UInt64? {
 
 ///|
 /// 从 `data[pos..]` 读 8 字节小端定长整数。
-pub fn read_fixed64(data : Bytes, pos : Int) -> UInt64? {
+pub fn read_fixed64(data : Bytes, pos : Int32) -> UInt64? {
   if pos < 0 || pos + 8 > data.length() {
     return None
   }
@@ -175,7 +183,7 @@ pub fn read_fixed64(data : Bytes, pos : Int) -> UInt64? {
 ///|
 /// 从 `data[pos..]` 读 4 字节小端定长整数。
 /// 不做 `limit` 参数：定长读取的长度是已知的，越界判断用 `pos + 4 > length()` 就够。
-pub fn read_fixed32(data : Bytes, pos : Int) -> Int? {
+pub fn read_fixed32(data : Bytes, pos : Int32) -> Int32? {
   if pos < 0 || pos + 4 > data.length() {
     return None
   }
