@@ -64,6 +64,17 @@ flowchart TB
 
 ## 快速开始
 
+**环境要求：`moonc >= 0.10.16`。** 这条是硬门槛 —— 从 `0.10.16` 起 `Int` 是 64 位、
+`Int32` 才是 32 位，本库所有「本来就是 32 位」的字段（varint32、块内偏移、长度计数）
+都显式标成了 `Int32`，旧编译器看到这些标注会直接报错。CI 里有一步专门检查版本。
+
+```bash
+moonc -v                          # 需要 v0.10.16 或更高
+```
+
+安装与升级见 [CONTRIBUTING 的工具链一节](CONTRIBUTING.md)（`moon upgrade` 需要交互终端，
+脚本里跑不了，那里有手动三步）。其余零依赖。
+
 ```bash
 moon check                        # 类型检查（零警告）
 moon test                         # 单元测试
@@ -240,6 +251,9 @@ python bench.py        --cmd "../../_build/native/release/build/cmd/dbcli/dbcli.
 
 **「这个库要干什么、怎么验证它做对了」** 看
 [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md) —— 五关验收手册。
+
+**「评审要求的那 9 项，逐条对应在哪」** 看
+[`docs/engineering/REVIEW.md`](docs/engineering/REVIEW.md) —— 每条都给了自查命令与证据位置。
 
 ---
 

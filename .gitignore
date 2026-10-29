@@ -7,6 +7,10 @@ target
 .mooncakes/
 .moonagent/
 
+# `moon info` 生成的包接口摘要（文件头写明 DON'T EDIT IT）。
+# 0.10.18 起 `moon check` / `moon build` 会顺带产出，属构建副产物。
+pkg.generated.mbti
+
 # 测试脚本产生的数据目录
 benches/python/data/
 # 同场 A/B / 对照实验的临时数据目录（bench.py --data-dir ./data-*）

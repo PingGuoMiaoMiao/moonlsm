@@ -39,7 +39,7 @@ body:
     attributes:
       label: 运行环境
       description: 操作系统 + 版本，MoonBit 版本（`moon version --all` 的输出）
-      placeholder: "Windows 11 23H2 / moon 0.1.20260827"
+      placeholder: "Windows 11 23H2 / moonc v0.10.18 / moon 0.1.20261028"
     validations:
       required: true
 

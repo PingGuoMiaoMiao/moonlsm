@@ -26,6 +26,7 @@
 | 文档 | 内容 |
 |---|---|
 | [ACCEPTANCE.md](engineering/ACCEPTANCE.md) | **验收手册**：这个库要干什么、四类契约、五关验收（命令 + 期望输出 + 失败含义）、8 个参考库位置、发布前检查清单 |
+| [REVIEW.md](engineering/REVIEW.md) | **评审对照**：比赛验收 9 项要求逐条自查 —— 现状、怎么自己验一遍、证据在哪个文件 |
 | [PROCESS.md](engineering/PROCESS.md) | 仓库命名考究、参考对象分层、GIV 开发模型、设计模型与 8 张流程图、项目→产品四阶段演进、度量与门禁定义 |
 | [BENCHMARK.md](engineering/BENCHMARK.md) | **性能基准**：主表、组提交量化、SQLite 对照、四处已知瓶颈、测量方法的局限 |
 | [DEMO.md](engineering/DEMO.md) | **90 秒演示方案**：分镜、逐字稿、录制前检查、追问应答 |

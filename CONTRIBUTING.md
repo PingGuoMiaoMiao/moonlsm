@@ -28,45 +28,70 @@
 
 Python 只用于 `benches/python/` 下的测试脚本，不参与构建。运行库本身零依赖。
 
-### 工具链版本：能记录，但锁不住
+### 工具链版本：要求 `moonc >= 0.10.16`
 
-仓库根目录的 [`.moon-version`](.moon-version) 记录**本项目开发与验证所用的版本**。
+**硬性要求：`moonc` 不低于 `0.10.16`。** 低于这个版本编译不过，原因见下面的「Int 的语义」。
 
 ```bash
-cat .moon-version          # 项目验证版本
-moon version --all         # 本地实际版本
+moonc -v                   # 需要 v0.10.16 或更高
+moon version --all         # 项目验证版本见 .moon-version
+cat .moon-version          # 当前：0.1.20261028（= moonc v0.10.18）
 ```
 
-**为什么记录而不是锁定**：官方 CDN 只提供 `latest` 的二进制。实测
+`0.10.16` 是一条真实的分界线：**从这一版起 `Int` 是 64 位，`Int32` 才是 32 位**。
+本仓库所有「本来就想表达 32 位」的地方（varint32、fixed32、块内偏移、长度计数）
+都显式标注成 `Int32`，所以旧编译器看到这些标注会直接报「类型不存在」。
+
+CI 里有一步专门检查这件事（`检查 moonc ≥ 0.10.16`），低于要求直接失败，
+报错信息比让编译器吐出一堆类型不匹配要清楚。
+
+**为什么记录版本而不是锁定**：官方 CDN 只提供 `latest` 的二进制。实测
 
 ```
-https://cli.moonbitlang.com/binaries/0.1.20260827/moonbit-linux-x86_64.tar.gz  →  403
+https://cli.moonbitlang.com/binaries/0.1.20261028/moonbit-linux-x86_64.tar.gz  →  403
+https://cli.moonbitlang.com/cores/core-0.1.20261028.tar.gz                     →  403
 https://cli.moonbitlang.com/binaries/latest/moonbit-linux-x86_64.tar.gz        →  200
 ```
 
-任何带版本号的路径都下不到，所以「在 CI 里安装指定版本」这件事**做不到**。CI 只能装 `latest`。
+任何带版本号的路径都下不到，所以「在 CI 里安装指定版本」这件事**做不到**，CI 只能装 `latest`。
+`.moon-version` 的作用是**记录事实**：CI 打印它并与实际版本对比，不一致时给 warning annotation，
+排查「格式差异 / 废弃警告」时有据可查。
 
-**这带来一个必须知道的差异**：
+**格式检查在 CI 里是告警，不阻断**：工具链会随 `latest` 漂移，格式规则的变化不是正确性问题，
+让它阻断等于让「上游发版」变成「主干变红」。格式由本地 pre-commit hook 保证。
+**类型检查、测试、构建在 CI 里都是阻断的**，它们不随格式化规则变化。
 
-| 版本 | `Int32` 类型 | `moon fmt` 对 `Int` 的处理 |
-|---|---|---|
-| `0.1.20260827`（项目验证版本） | **不存在** | 保持 `Int` |
-| `0.1.20261016`（当前 latest） | 存在 | 重写成 `Int32` |
+### 手动安装/升级工具链
 
-所以本项目的代码统一写 `Int`——**因为旧版里没有 `Int32`**。CI 的 formatter 会想把它改成 `Int32`，这个差异不可能同时消除。
+`moon upgrade` 需要交互式终端，在脚本或 CI 里跑不了（会报 `IO error: not a terminal`）。
+这时按官方安装脚本做的那两步手动来——**工具链和 core 是两个包，缺一不可**：
 
-**应对方式**：
+```bash
+# 1. CLI 本体（moon / moonc / moonrun）
+curl -sSL -o /tmp/mb.zip https://cli.moonbitlang.com/binaries/latest/moonbit-windows-x86_64.zip
+unzip -q /tmp/mb.zip -d ~/.moon          # 覆盖 bin/ lib/ include/ share/
 
-- **格式检查在 CI 里是告警，不阻断**。格式由本地 pre-commit hook 保证（用你自己的 formatter）
-- **类型检查与测试在 CI 里是阻断的**，它们不随格式化规则变化
-- CI 会打印版本对比，不一致时给 warning annotation
+# 2. 标准库（新版不随 CLI 分发，要单独下）
+curl -sSL -o /tmp/core.tar.gz https://cli.moonbitlang.com/cores/core-latest.tar.gz
+tar xf /tmp/core.tar.gz -C ~/.moon/lib   # 得到 ~/.moon/lib/core
+
+# 3. 打包 core（不跑这步，moon check 会报
+#    "Cannot inject the standard library moonbitlang/core: Cannot load the core file"）
+cd ~/.moon/lib/core
+moon bundle --warn-list -a --all
+moon bundle --warn-list -a --target wasm-gc --quiet
+```
+
+Linux / macOS 把第一步的 URL 换成 `moonbit-linux-x86_64.tar.gz` / `moonbit-darwin-aarch64.tar.gz`。
+想省事也可以直接跑官方脚本（它会自动做完上面三步）：
+`curl -fsSL https://cli.moonbitlang.com/install/unix.sh | bash`。
 
 **升级工具链是一个独立任务，不是顺手做的事**：
 
 1. 装新版本，`moon version --all` 确认
-2. `moon fmt`，看它把什么改成了什么（当前预期是 `Int` → `Int32`）
-3. 全局替换并修掉不兼容，`moon check --deny-warn` + `moon test` 全绿
-4. 更新 `.moon-version`
+2. `moon fmt`，看它把什么改成了什么（0.10.16 那次是 `Int` → `Int32`，197 处）
+3. `moon check --deny-warn` + `moon test` + 三后端全绿
+4. 更新 `.moon-version` 与本文档的版本段
 5. 单独开 PR，commit 类型用 `chore(toolchain)`
 
 ⚠️ **升级是不可逆的**：旧版本已经无法从 CDN 下载，装上新版后回不去。升级前先确认现有代码在新版本下能编译。

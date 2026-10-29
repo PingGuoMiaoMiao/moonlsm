@@ -8,7 +8,7 @@ description: "安装 MoonBit CLI 并预热依赖注册表。跨 Linux / macOS / 
 
 inputs:
   version:
-    description: "MoonBit CLI 版本。默认 latest；可选 nightly 或具体版本号（如 0.1.20260827）"
+    description: "MoonBit CLI 版本。默认 latest；可选 nightly 或具体版本号（如 0.1.20261028）；注意带版本号的 CDN 路径多为 403，见 CONTRIBUTING"
     required: false
     default: "latest"
 

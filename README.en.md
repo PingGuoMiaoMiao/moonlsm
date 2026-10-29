@@ -70,6 +70,18 @@ are documented in file headers and [ADR-0003](docs/adr/0003-crash-contract.md).
 
 ## Quick start
 
+**Requires `moonc >= 0.10.16`.** This is a hard floor: since `0.10.16`, `Int` is 64-bit
+and `Int32` is the 32-bit type. Every field in this library that is genuinely 32-bit
+(varint32, in-block offsets, length counters) is explicitly annotated `Int32`, so an
+older compiler rejects them outright. CI enforces this with a dedicated version check.
+
+```bash
+moonc -v                          # needs v0.10.16 or newer
+```
+
+Install/upgrade instructions are in [CONTRIBUTING](CONTRIBUTING.md) (`moon upgrade`
+needs an interactive terminal, so there is a manual three-step path). No other deps.
+
 ```bash
 moon check                        # type check (zero warnings)
 moon test                         # unit tests
@@ -263,6 +275,10 @@ progression are all in
 **What this library is supposed to do, and how we verify it does so** — see
 [`docs/engineering/ACCEPTANCE.md`](docs/engineering/ACCEPTANCE.md), a five-gate
 acceptance manual.
+
+**Where each of the nine review requirements is satisfied** — see
+[`docs/engineering/REVIEW.md`](docs/engineering/REVIEW.md), with a self-check
+command and a pointer to the evidence for every item.
 
 ---
 

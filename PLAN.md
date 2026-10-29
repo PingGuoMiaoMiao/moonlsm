@@ -388,6 +388,7 @@ python bench.py --n 1000000
 | 流式扫描游标 | `Db::scan` 现在是「整段读进数组再归并」，是范围扫描慢一个数量级的根因 | v1.2 |
 | block size 调参 | 4 KiB 与 LevelDB 一致，但没做过对照实验，不宣称它是最优 | 待量化 |
 
-> 提示：本机 MoonBit 版本 `0.1.20260827`。语法细节以 `moon check` 的报错为准，别信记忆——
+> 提示：本机 MoonBit 版本已升到 `0.1.20261028`（moonc v0.10.18，要求 ≥ 0.10.16）。
+> 语法细节以 `moon check` 的报错为准，别信记忆——
 > 比如 `typealias` 在这个版本已废弃，要用 `type Alias = Type`；
 > `Map::new()` 也已废弃，要用 `Map([])`；`String::compare` 按长度优先，二进制 key 必须用 `compare_bytes`。

@@ -11,6 +11,60 @@
 
 ---
 
+## [0.3.1] - 2026-10-29
+
+**工具链版。** 开发与验证用的编译器从 `moonc v0.10.11` 升到 **`v0.10.18`**
+（`moon 0.1.20261028`），满足「`moonc >= 0.10.16`」这条硬要求。
+
+升级的实质是一次**类型语义迁移**：从 `0.10.16` 起 `Int` 是 64 位，`Int32` 才是 32 位。
+本库所有「本来就是 32 位」的字段现在显式标注为 `Int32` ——
+`write_varint32` / `write_fixed32` / `write_fixed16` / `varint32_len` /
+块内偏移 / `num_restarts` / 各处的长度计数，共 **197 处标注**。
+这不是为了让 formatter 闭嘴，而是把原来隐式的 32 位假设写成类型：
+在这些位置用 64 位整数，超范围时会静默截断，而磁盘格式只给它们 4 个字节。
+
+**磁盘格式没有变**，一个字节都没动。`block_wbtest.mbt` 里那些逐字节断言
+（`assert_bytes_eq(b.finish(), want)`）在升级前后都是绿的，这是最直接的证据。
+0.3.0 写的库直接能开，也不需要迁移工具。
+
+**API 层面的变化（需要调用方注意）**：上面几个函数的参数/返回类型从 `Int` 变成 `Int32`。
+传字面量（`write_fixed32(buf, 42)`）不受影响，类型推断会适配；
+但如果你把结果存在一个 `let n : Int` 变量里再传进去，现在会编译失败 ——
+这正是应该失败的地方。
+
+### 改动
+
+- **工具链**：`moonc v0.10.11` → **`v0.10.18`**，`.moon-version` 同步为 `0.1.20261028`
+- **`Int` → `Int32`**：197 处类型标注，覆盖 varint / fixed32 / fixed16 编解码、
+  block 与 SST 的偏移和长度、bloom 的位图长度、WAL 帧长度
+- **CI 新增门禁**：`检查 moonc ≥ 0.10.16（阻断）`。低于要求直接失败并打印升级方式，
+  比让编译器吐出一堆「类型不存在」清楚得多
+- **CI 的格式检查改用 `moon fmt --check`**（原来是 `moon fmt` 后看 diff），
+  仍然只告警不阻断 —— 官方 CDN 只提供 latest，工具链会漂移，格式规则的变化不是正确性问题
+- **`CONTRIBUTING.md` 重写工具链一节**：说清 0.10.16 这条线、为什么 CDN 锁不住版本、
+  以及 `moon upgrade` 在非交互环境失败时的**手动三步**（CLI 本体 / core 标准库 /
+  `moon bundle`）。第三步最容易漏 —— 新版 core 不再随 CLI 分发，
+  不 bundle 的话 `moon check` 会报 `Cannot inject the standard library moonbitlang/core`
+- **两份 README 的快速开始**加了环境要求，放在第一条命令之前
+
+### 验证
+
+全量重跑，一个都没省：
+
+| 项 | 结果 |
+|---|---|
+| `moon check --deny-warn` | 零警告 |
+| `moon test` | **211 / 211** |
+| `moon test --target wasm-gc .` | 186 / 186 |
+| `moon test --target js .` | 186 / 186 |
+| `moon build --target native --release` | 成功（dbcli + examples） |
+| `moon fmt --check` | 一致 |
+| `model_check.py --ops 2000` | 0 错 |
+| `crash_test.py --rounds 10` | 10/10，丢失 0 半条 0 |
+| `examples/basic` | 四步全过，二次运行数据仍在 |
+
+---
+
 ## [0.3.0] - 2026-10-26
 
 **磁盘格式版。** 给 SST 里的 data block、index block、filter block 各加了

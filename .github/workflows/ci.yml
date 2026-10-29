@@ -25,28 +25,49 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 格式检查（告警，不阻断）
+  # 工具链门禁 + 格式检查（告警，不阻断）
   #
-  # 为什么不用 latest 锁版本、也不阻断：
+  # 这一 job 是**其他 job 的前置**，它同时管两件事：
   #
-  # 1. 官方 CDN 只提供 latest 的二进制。实测
-  #    https://cli.moonbitlang.com/binaries/0.1.20260827/... 返回 403，
-  #    任何带版本号的路径都下不到，所以「在 CI 里装指定版本」做不到。
-  # 2. latest 的 moon fmt 会把 `Int` 规范化成 `Int32`，而本项目开发所用的
-  #    0.1.20260827 里 `Int32` 这个类型还不存在。两边不可能同时满足。
-  # 3. 格式差异不是正确性问题。让它阻断合并，等于让「工具链发布新版本」
-  #    变成「主干变红」，收益为负。
+  # 1. **moonc 版本必须 ≥ 0.10.16**（阻断）。这是验收的硬门槛，也是代码
+  #    能编译的前提：0.10.16 起 `Int` 是 64 位、`Int32` 才是 32 位，
+  #    本仓库的类型标注已按新语义迁移（见 CONTRIBUTING 的版本一节）。
+  #    用旧编译器编译会直接失败，所以这个检查放在最前面，报错信息比
+  #    「一堆类型不匹配」有用得多。
   #
-  # 所以：格式由本地 pre-commit hook 保证（用开发者自己的 formatter），
-  # CI 只做告警。真正的类型检查与测试在 test job，那里是阻断的。
+  # 2. **格式一致性**（仅告警，不阻断）。官方 CDN 只提供 latest 的二进制
+  #    （实测任何带版本号的路径都是 403，见 CONTRIBUTING），所以 CI 装不了
+  #    指定版本，工具链会随时间漂移。格式规则的变化不是正确性问题，
+  #    让它阻断等于让「上游发版」变成「主干变红」。
+  #    格式由本地 pre-commit hook 保证，CI 只做提醒。
   # ---------------------------------------------------------------------------
   fmt:
-    name: 格式（告警）
+    name: 工具链与格式
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-moonbit
+
+      - name: 检查 moonc ≥ 0.10.16（阻断）
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `moonc -v` 形如 v0.10.18+6c83a7f62 (2026-10-28)，取前三段数字
+          V=$(moonc -v | sed -E 's/^v?([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          echo "moonc = $V"
+          IFS=. read -r MA MI PA <<< "$V"
+          ok=0
+          if [ "$MA" -gt 0 ]; then ok=1
+          elif [ "$MA" -eq 0 ] && [ "$MI" -gt 10 ]; then ok=1
+          elif [ "$MA" -eq 0 ] && [ "$MI" -eq 10 ] && [ "$PA" -ge 16 ]; then ok=1
+          fi
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::moonc $V 低于 0.10.16。本项目要求 moonc >= 0.10.16（Int 已是 64 位）。"
+            echo "升级方式：moon upgrade，或从 https://www.moonbitlang.com/download 重装。"
+            exit 1
+          fi
+          echo "moonc $V 满足 >= 0.10.16"
 
       - name: 对比 .moon-version
         shell: bash
@@ -56,19 +77,17 @@ jobs:
           echo "项目验证版本: $WANT"
           echo "CI 实际版本:  $GOT"
           if [ "$WANT" != "$GOT" ]; then
-            echo "::warning::CI 工具链 ($GOT) 与项目验证版本 ($WANT) 不一致。格式与废弃警告的差异可能来自这里。"
+            echo "::warning::CI 工具链 ($GOT) 与项目验证版本 ($WANT) 不一致。格式差异可能来自这里。"
           fi
 
-      - name: moon fmt 后是否产生 diff
+      - name: moon fmt --check（仅告警）
         shell: bash
         run: |
-          moon fmt
-          if ! git diff --exit-code --quiet; then
-            echo "::warning::moon fmt 产生了 diff。这通常意味着 CI 的 formatter 比本地新。"
-            echo "本地请确认 moon version 与 .moon-version 一致；若确认无误，直接提交这次格式化的结果。"
-            git diff
-          else
+          if moon fmt --check; then
             echo "格式一致。"
+          else
+            echo "::warning::moon fmt --check 报告了格式差异。"
+            echo "本地请确认 moon version 与 .moon-version 一致，然后跑一次 moon fmt 并提交。"
           fi
 
   # ---------------------------------------------------------------------------
